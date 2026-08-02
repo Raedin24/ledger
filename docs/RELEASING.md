@@ -5,20 +5,29 @@ Ledger is published from two GitHub repositories:
 | Repo | Visibility | Contents |
 |---|---|---|
 | `Raedin24/ledger-dev` | private | The real repository. Full development history, all branches. Day-to-day work happens here. |
-| `Raedin24/ledger` | public | One parentless commit per release, tagged with its version. No development history, ever. |
+| `Raedin24/ledger` | public | One commit per release, tagged with its version, each parented on the release before it. No development history, ever. |
 
 Both are remotes of the same local clone: `origin` is the private one, `release`
 is the public one.
 
 ## The rule
 
-**The public repository must only ever receive parentless snapshot commits.**
+**No commit on the public repository may reach the development history.**
 
 This is deliberate and load-bearing, not tidiness. Early development commits
 contain real message samples that were replaced with invented stand-ins later,
 and git preserves both sides of a replacement — the originals stay readable in
 any clone that carries the history. A squash would not help, because a squashed
-commit still has parents. Only a fresh root does.
+commit still has parents leading back to the same place.
+
+So the public repo has its own history, made of release snapshots only. The
+first was parentless; each release since is parented on the release before it,
+giving a public log that reads v0.1.1 → v0.1.2 → … and never anything else. A
+snapshot's tree comes from `main`, but its ancestry does not.
+
+That means the safety check is **not** "is this commit parentless" — only the
+first one was. It is "can this commit reach the development root", which is
+step 5 below and must be run every time.
 
 So: never `git push --all`, never `git push --tags`, and never `git push release
 main`. Push to `release` with explicit refspecs, always.
@@ -89,54 +98,56 @@ Note `adb install` bypasses Play Protect. It is a developer path, not proof that
 a user can install the APK — see [Play Protect](#play-protect).
 
 **4. Build the snapshot commit.** Pure plumbing: `commit-tree` writes a new
-commit object directly and touches neither the working tree nor any branch.
+commit object directly and touches neither the working tree nor any branch. The
+tree comes from `main`; the parent is the previous release.
 
 ```sh
+git fetch release
+PREV=$(git rev-parse release/main)          # the last published snapshot
 TREE=$(git rev-parse main^{tree})
 
-ORPHAN=$(printf 'Ledger v0.2.0\n\nOne-line summary of the release.\n' \
+SNAP=$(printf 'Ledger v0.2.0\n\nOne-line summary of the release.\n' \
   | GIT_AUTHOR_NAME="Raedin" \
     GIT_AUTHOR_EMAIL="79509805+Raedin24@users.noreply.github.com" \
     GIT_COMMITTER_NAME="Raedin" \
     GIT_COMMITTER_EMAIL="79509805+Raedin24@users.noreply.github.com" \
-    git commit-tree "$TREE")
+    git commit-tree "$TREE" -p "$PREV")
 
-echo "$ORPHAN"
+echo "$SNAP"
 ```
 
-The noreply address is intentional: the private repo keeps the real email, the
-public one does not publish it.
+Drop `-p "$PREV"` only when publishing the very first release into an empty
+repo. The noreply address is intentional: the private repo keeps the real email,
+the public one does not publish it.
 
 **5. Check it before it leaves the machine.** All four must hold:
 
 ```sh
-# parentless — prints nothing
-git rev-list --parents -n1 "$ORPHAN" | tr ' ' '\n' | tail -n +2
-
 # identical file tree to main — prints nothing
-git diff --stat main "$ORPHAN"
+git diff --stat main "$SNAP"
 
-# reaches exactly one commit — prints 1
-git rev-list --count "$ORPHAN"
+# builds on the published release — prints the previous snapshot's sha
+git rev-list --parents -n1 "$SNAP" | tr ' ' '\n' | tail -n +2
 
-# cannot reach the development root — prints "clean"
-git merge-base --is-ancestor $(git rev-list --max-parents=0 main) "$ORPHAN" \
+# adds exactly one commit to the public history — prints 1
+git rev-list --count "$PREV".."$SNAP"
+
+# cannot reach the development root — prints "clean". THE one that matters.
+git merge-base --is-ancestor $(git rev-list --max-parents=0 main) "$SNAP" \
   && echo "LEAK — do not push" || echo "clean"
 ```
 
 **6. Tag and push.** Explicit refspecs only:
 
 ```sh
-git tag -a v0.2.0 "$ORPHAN" -m "Ledger v0.2.0"
-git push release "$ORPHAN":refs/heads/main --force
+git tag -a v0.2.0 "$SNAP" -m "Ledger v0.2.0"
+git push release "$SNAP":refs/heads/main
 git push release v0.2.0
 ```
 
-The `--force` is expected here and nowhere else: consecutive snapshots share no
-ancestry, so every release after the first is a non-fast-forward by
-construction. The public repo holds no history worth preserving — that is the
-whole point — so overwriting its `main` loses nothing. Tags are what make past
-releases retrievable.
+No `--force`: the snapshot descends from what is already published, so this is
+an ordinary fast-forward. If git rejects it as non-fast-forward, the parent was
+wrong — rebuild from the real `release/main` rather than forcing past it.
 
 **7. Attach the APK.** `gh release create v0.2.0 --repo Raedin24/ledger` with
 the signed APK from `app/build/outputs/apk/release/`.

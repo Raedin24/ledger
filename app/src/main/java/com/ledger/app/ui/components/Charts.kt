@@ -28,11 +28,18 @@ import com.ledger.app.ui.theme.LedgerPalette
  * spending rhythm rather than absolute figures. Zero-days show as a faint track.
  */
 @Composable
+/**
+ * @param elapsed how many leading entries have actually happened. Days beyond it
+ *  are drawn at reduced opacity, so a day you spent nothing on stays visually
+ *  distinct from a day that has not arrived — without which an early month reads
+ *  as a month of zero spending rather than a month barely begun.
+ */
 fun MiniBarChart(
     values: List<Long>,
     modifier: Modifier = Modifier,
     barColor: Color = LedgerPalette.Spend,
     trackColor: Color = LedgerPalette.SurfaceSunken,
+    elapsed: Int = values.size,
 ) {
     val max = (values.maxOrNull() ?: 0L).coerceAtLeast(1L)
     Canvas(modifier) {
@@ -45,6 +52,7 @@ fun MiniBarChart(
             // Faint full-height track so sparse months still read as a timeline.
             drawRoundRect(
                 color = trackColor,
+                alpha = if (i < elapsed) 1f else 0.45f,
                 topLeft = Offset(x, 0f),
                 size = Size(barW, size.height),
                 cornerRadius = radius,

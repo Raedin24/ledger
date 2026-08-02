@@ -63,8 +63,10 @@ data class OverviewState(
     val lastMonthSpentMinor: Long = 0,
     val avgDailyMinor: Long = 0,
     val reviewCount: Int = 0,
-    /** One value per elapsed day of the month (index 0 = the 1st), for the timeline. */
+    /** One value per day of the *whole* month (index 0 = the 1st), for the timeline. */
     val dailySpendSeries: List<Long> = emptyList(),
+    /** How many of those days have happened, so the rest can be drawn as pending. */
+    val elapsedDays: Int = 0,
     val topCategories: List<CategoryTotal> = emptyList(),
     val largestExpenses: List<TransactionEntity> = emptyList(),
     val recent: List<TransactionEntity> = emptyList(),
@@ -134,7 +136,15 @@ class OverviewViewModel @Inject constructor(repo: LedgerRepository) : ViewModel(
      * time any of the nine queries fired.
      */
     val state: StateFlow<OverviewState> = combine(core, extras) { c, e ->
-        val daysElapsed = LocalDate.now(ZoneId.systemDefault()).dayOfMonth
+        val today = LocalDate.now(ZoneId.systemDefault())
+        val daysElapsed = today.dayOfMonth
+        // The series spans the whole month, not just the days that have happened.
+        // Sized to elapsed days it held two bars on the 2nd and twenty-eight on
+        // the 28th, so each was ~160dp wide at the start of a month and the card
+        // looked like a different component every week. A fixed span keeps the
+        // bar width constant and lets an early month read as what it is: mostly
+        // ahead of itself.
+        val daysInMonth = today.lengthOfMonth()
         val spentByDom = e.daily.associate { it.day.substringAfterLast('-').toInt() to it.spentMinor }
         OverviewState(
             loaded = true,
@@ -144,7 +154,8 @@ class OverviewViewModel @Inject constructor(repo: LedgerRepository) : ViewModel(
             lastMonthSpentMinor = e.lastSpent,
             avgDailyMinor = c.spent / daysElapsed.coerceAtLeast(1),
             reviewCount = e.reviewCount,
-            dailySpendSeries = (1..daysElapsed).map { spentByDom[it] ?: 0L },
+            dailySpendSeries = (1..daysInMonth).map { spentByDom[it] ?: 0L },
+            elapsedDays = daysElapsed,
             topCategories = c.top,
             largestExpenses = e.largest,
             recent = c.recent,

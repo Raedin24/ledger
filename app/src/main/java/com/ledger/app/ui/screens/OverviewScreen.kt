@@ -225,6 +225,7 @@ fun OverviewScreen(
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                     barColor = colors.spend,
                     trackColor = colors.surfaceSunken,
+                    elapsed = state.elapsedDays,
                 )
             }
         }
