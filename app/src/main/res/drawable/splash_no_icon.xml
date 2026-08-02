@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A deliberately invisible system-splash icon.
+
+  Android 12+ always draws a splash window, and its lifetime is dictated by
+  process start rather than by anything we can time. The design's signature beat
+  is the seal *drawing itself*, which means an animation with a beginning — and
+  any mark shown on the system splash would have to either stutter (fast start,
+  cut mid-draw) or freeze (slow start) when the in-app splash picks it up.
+
+  So the system splash contributes only the cream page, and the in-app splash
+  owns the whole brand moment. Cream to cream: nothing flashes, nothing restarts,
+  and the seal strikes exactly once.
+
+  The transparent path is load-bearing, not decoration. VectorDrawable.inflate
+  throws "no path defined" on a <vector> with no children, and the platform reads
+  windowSplashScreenAnimatedIcon through a guarded getDrawable that swallows the
+  throw and returns null — whereupon it falls back to the launcher icon, which is
+  exactly the second splash this file exists to prevent. A path that fills
+  nothing inflates cleanly and draws nothing.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="1dp"
+    android:height="1dp"
+    android:viewportWidth="1"
+    android:viewportHeight="1">
+    <path
+        android:pathData="M0,0h1v1h-1z"
+        android:fillColor="#00000000" />
+</vector>

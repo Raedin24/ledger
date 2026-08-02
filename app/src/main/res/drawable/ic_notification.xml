@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Status-bar icon: the design's simplified seal as a white-on-transparent
+  silhouette, 24dp.
+
+  Android draws a notification's small icon as an alpha mask and tints it, so it
+  must be a flat silhouette on transparency. Passing the adaptive launcher icon
+  here (as this app previously did) hands the system a full-bleed terracotta
+  square, which it flattens into a solid tinted blob with the mark invisible.
+
+  Same simplification as the themed icon: one solid ring plus the ₵, no dashed
+  ring, at the smallest size the mark is ever asked to work.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:scaleX="0.294"
+        android:scaleY="0.294"
+        android:translateX="-38"
+        android:translateY="-38">
+
+        <path
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="5.4"
+            android:pathData="M50,14.6 A34,34 0 1 1 50,82.6 A34,34 0 1 1 50,14.6 Z" />
+
+        <group
+            android:pivotX="50"
+            android:pivotY="48.6"
+            android:scaleX="1.087"
+            android:scaleY="1.087">
+            <path
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M58.948,34.674 A16,16.8 0 1 0 58.948,62.526 L58.35,54.471 A9.6,11.9 0 1 1 58.35,42.729 Z" />
+            <path
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M51.99,29.4 L42.41,67.8 L48.01,67.8 L57.59,29.4 Z" />
+        </group>
+    </group>
+</vector>

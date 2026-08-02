@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      PERMISSIONS — deliberately minimal (see expense-tracker-app-decisions.md).
+      RECEIVE_SMS ONLY: not READ_SMS, not SEND_SMS, not default-SMS-handler.
+      There is intentionally NO android.permission.INTERNET — the app cannot make
+      network calls even if a dependency tried to. Verify this survives manifest
+      merging before every release (check the merged manifest, not just here).
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <!--
+      READ_SMS backs the one-time "Import past transactions" action: it reads the
+      existing inbox for trusted senders only, runs each through the same on-device
+      parse pipeline, and never stores raw bodies. Not the default SMS handler.
+      (Play restricts READ_SMS; this build is distributed by sideload.)
+    -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Explicitly reject any INTERNET permission a merged library might add. -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+
+    <!--
+      The SMS permissions above implicitly require telephony hardware, which would
+      hide the app from tablets / Chrome OS. Reading SMS is a bonus, not a hard
+      requirement (the app is still usable for manual review/import), so declare
+      the feature optional.
+    -->
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
+    <application
+        android:name=".LedgerApp"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Ledger">
+
+        <!-- Launches under the splash theme; installSplashScreen() swaps it for
+             Theme.Ledger via postSplashScreenTheme. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Ledger.Splash">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          SMS_RECEIVED is a protected broadcast (only the OS can send it), so no
+          app can forge a fake transaction into the parser. Not exported to any
+          other component. High priority so we see the alert promptly.
+        -->
+        <receiver
+            android:name=".sms.SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="999">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

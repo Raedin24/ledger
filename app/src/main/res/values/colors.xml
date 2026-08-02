@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The seal's terracotta field. The mark is paper-on-terracotta, so this is
+         the adaptive icon's background layer, and it is what fills the corners the
+         launcher's mask crops. -->
+    <color name="ic_launcher_background">#8F4A28</color>
+
+    <!-- Splash page: the same cream paper the app opens onto, so the handoff from
+         the system splash to the first screen has nothing to flash. -->
+    <color name="splash_background">#F7F2E7</color>
+</resources>

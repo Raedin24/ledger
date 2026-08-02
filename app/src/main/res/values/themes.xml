@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose drives the real theming; this is the base theme the app runs in
+         after the splash. Cream background matches the Ledger palette so there is
+         no white flash. -->
+    <style name="Theme.Ledger" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/splash_background</item>
+        <item name="android:statusBarColor">@color/splash_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <!--
+      The launch theme. Contributes the cream page and nothing else; see
+      splash_no_icon for why the mark is not drawn here. postSplashScreenTheme is
+      what the activity is switched to once installSplashScreen() runs, so
+      Theme.Ledger above still governs the running app.
+    -->
+    <style name="Theme.Ledger.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_no_icon</item>
+        <item name="postSplashScreenTheme">@style/Theme.Ledger</item>
+    </style>
+</resources>

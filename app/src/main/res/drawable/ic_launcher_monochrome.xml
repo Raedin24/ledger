@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Single-colour seal for Android 13+ themed icons; the system applies its own
+  tint, so the colour here is only a placeholder.
+
+  This is the design's *simplified* mark — one solid, heavier ring and the cedi,
+  with the dashed "struck" ring dropped. Themed icons are rendered small and
+  re-tinted, which is exactly the case the design calls out: the solid ring and
+  the ₵ carry the mark, and the dashed ring would turn to mud. The ₵ is scaled up
+  slightly to match, as the design's own small-size and monochrome variants do.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:scaleX="0.4364"
+        android:scaleY="0.4364"
+        android:translateX="4"
+        android:translateY="4">
+
+        <path
+            android:strokeColor="#000000"
+            android:strokeWidth="4.6"
+            android:pathData="M50,14.6 A34,34 0 1 1 50,82.6 A34,34 0 1 1 50,14.6 Z" />
+
+        <group
+            android:pivotX="50"
+            android:pivotY="48.6"
+            android:scaleX="1.087"
+            android:scaleY="1.087">
+            <path
+                android:fillColor="#000000"
+                android:pathData="M58.948,34.674 A16,16.8 0 1 0 58.948,62.526 L58.35,54.471 A9.6,11.9 0 1 1 58.35,42.729 Z" />
+            <path
+                android:fillColor="#000000"
+                android:pathData="M51.99,29.4 L42.41,67.8 L48.01,67.8 L57.59,29.4 Z" />
+        </group>
+    </group>
+</vector>
