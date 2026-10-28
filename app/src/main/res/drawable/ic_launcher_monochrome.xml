@@ -3,11 +3,10 @@
   Single-colour seal for Android 13+ themed icons; the system applies its own
   tint, so the colour here is only a placeholder.
 
-  This is the design's *simplified* mark — one solid, heavier ring and the cedi,
-  with the dashed "struck" ring dropped. Themed icons are rendered small and
-  re-tinted, which is exactly the case the design calls out: the solid ring and
-  the ₵ carry the mark, and the dashed ring would turn to mud. The ₵ is scaled up
-  slightly to match, as the design's own small-size and monochrome variants do.
+  This is the design's simplified mark: one heavier solid ring and the cedi,
+  without the dashed inner ring. Themed icons are small and re-coloured, and
+  the dashed ring wouldn't survive that. The ₵ is slightly larger to match, as
+  in the design's small and single-colour versions.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"

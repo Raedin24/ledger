@@ -3,13 +3,11 @@
   Status-bar icon: the design's simplified seal as a white-on-transparent
   silhouette, 24dp.
 
-  Android draws a notification's small icon as an alpha mask and tints it, so it
-  must be a flat silhouette on transparency. Passing the adaptive launcher icon
-  here (as this app previously did) hands the system a full-bleed terracotta
-  square, which it flattens into a solid tinted blob with the mark invisible.
+  Android uses a notification's small icon as a mask and colours it itself, so
+  it has to be a flat shape on a transparent background. The full-colour
+  launcher icon would show as a solid blob.
 
-  Same simplification as the themed icon: one solid ring plus the ₵, no dashed
-  ring, at the smallest size the mark is ever asked to work.
+  Like the themed icon, it is one solid ring and the ₵, without the dashed ring.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"

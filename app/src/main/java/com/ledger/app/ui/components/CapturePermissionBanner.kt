@@ -37,12 +37,12 @@ import com.ledger.app.security.CapturePermission
 import com.ledger.app.ui.theme.LedgerPalette
 
 /**
- * Prompts for the RECEIVE_SMS runtime permission that automatic capture needs,
- * and renders nothing once it is granted.
+ * Asks for the RECEIVE_SMS permission that automatic capture needs, and shows
+ * nothing once it is granted.
  *
- * It re-checks on every ON_RESUME, so it disappears immediately after the user
- * grants access — whether from the system dialog or the app-settings page (the
- * fallback once the OS stops showing the dialog on repeated denials).
+ * It checks again every time the screen resumes, so it disappears as soon as
+ * the user grants access, whether from the system dialog or from the app's
+ * settings page (the only route once Android stops showing the dialog).
  */
 @Composable
 fun CapturePermissionBanner(modifier: Modifier = Modifier) {
@@ -61,8 +61,8 @@ fun CapturePermissionBanner(modifier: Modifier = Modifier) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Capture notifications are opt-in on Android 13+; chain the request once the
-    // user has just turned capture on, so alerts can actually be shown.
+    // On Android 13+ notifications need their own permission. Ask right after
+    // the user turns capture on, so capture alerts can be shown.
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { /* best-effort; capture works regardless */ }
@@ -81,8 +81,8 @@ fun CapturePermissionBanner(modifier: Modifier = Modifier) {
 
     if (granted) return
 
-    // "Don't ask again": we've asked, it's still denied, and the OS will no
-    // longer surface the rationale dialog — the only path left is app settings.
+    // "Don't ask again": we asked, it is still denied, and Android won't show
+    // the dialog any more. The only way left is the app's settings page.
     val blockedPermanently = requestedOnce && activity != null &&
         !ActivityCompat.shouldShowRequestPermissionRationale(activity, CapturePermission.RECEIVE_SMS)
 
@@ -95,11 +95,9 @@ fun CapturePermissionBanner(modifier: Modifier = Modifier) {
         )
         Text(
             if (blockedPermanently) {
-                "Ledger needs SMS access to read transaction alerts. Enable it in " +
-                    "Settings to start capturing."
+                "Enable SMS access in Settings to capture alerts."
             } else {
-                "Ledger reads transaction alerts on-device to build your ledger. " +
-                    "Nothing is stored raw and nothing leaves the phone."
+                "Allow SMS access to capture alerts."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = LedgerPalette.InkSoft,

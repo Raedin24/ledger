@@ -1,5 +1,6 @@
 package com.ledger.app.data.mapper
 
+import com.ledger.app.data.db.CashMove
 import com.ledger.app.data.db.RuleEntity
 import com.ledger.app.data.db.TransactionEntity
 import com.ledger.domain.categorization.Rule
@@ -11,13 +12,13 @@ import com.ledger.domain.model.Money
 import com.ledger.domain.model.Transaction
 import java.time.Instant
 
-/** Converts between the framework-free domain types and Room entities. */
+// Converts between the domain types and Room entities.
 
 /**
- * Packs the account numbers hidden in an SMS narration into the pipe-delimited,
- * pipe-terminated form `TransactionEntity.referenceKeys` stores, so a SQL
- * `LIKE '%|key|%'` test can never match a partial key. Empty string when the
- * narration holds no number — distinct from null, which means "not computed".
+ * Writes the account numbers found in an SMS narration in the form
+ * `TransactionEntity.referenceKeys` stores (`"|244123456|"`), so a SQL
+ * `LIKE '%|key|%'` test can't match part of a number. Returns an empty string
+ * when there are none; null is reserved for "not worked out yet".
  */
 fun packReferenceKeys(referenceHint: String?): String {
     val keys = AccountKey.allIn(referenceHint)
@@ -25,9 +26,9 @@ fun packReferenceKeys(referenceHint: String?): String {
 }
 
 /**
- * [selfTransfer] is decided by the repository against the user's own accounts;
- * the canonical match keys are derived here so every insert path (live capture,
- * SMS backfill, backup import) stores them consistently.
+ * [selfTransfer] is decided by the repository. The match keys are worked out
+ * here, so every way a row is saved (live capture, inbox import, restore)
+ * stores them the same way.
  */
 fun Transaction.toEntity(dedupKey: String, selfTransfer: Boolean = false): TransactionEntity = TransactionEntity(
     dedupKey = dedupKey,
@@ -49,6 +50,7 @@ fun Transaction.toEntity(dedupKey: String, selfTransfer: Boolean = false): Trans
     person = person,
     notes = notes,
     needsReview = needsReview,
+    cashMove = if (cashMovement) CashMove.OFFER else null,
 )
 
 fun TransactionEntity.toDomain(): Transaction = Transaction(
@@ -67,6 +69,7 @@ fun TransactionEntity.toDomain(): Transaction = Transaction(
     person = person,
     notes = notes,
     needsReview = needsReview,
+    cashMovement = cashMove == CashMove.OFFER,
 )
 
 fun RuleEntity.toDomain(): Rule = Rule(
@@ -93,7 +96,7 @@ fun Rule.toEntity(): RuleEntity = RuleEntity(
     lastMatchedAtMillis = lastMatchedAtMillis,
 )
 
-/** Serialises a DuplicateDetector.Key to the stable string stored in the DB. */
+/** Turns a DuplicateDetector.Key into the string stored in the database. */
 fun DuplicateDetector.Key.asString(): String = when (this) {
     is DuplicateDetector.Key.Reference -> "R|$institution|$reference"
     is DuplicateDetector.Key.Composite ->

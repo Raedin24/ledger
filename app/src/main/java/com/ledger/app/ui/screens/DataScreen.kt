@@ -99,27 +99,24 @@ fun DataScreen(
         pendingRestoreUri = uri
     }
     val importOpen = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { vm.importFrom(it, passphrase = null, replace = false) }
+        uri?.let { vm.importFrom(it, passphrase = null) }
     }
     val smsPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         vm.onSmsPermissionResult(granted)
     }
 
-    // Beat 3 of the setup guide lives on this screen and points at the import row,
-    // which is the *last* thing in a scrolling list — so the guide has to bring it
-    // into view, or the mark ends up describing something off-screen (or sitting
-    // directly on top of it).
+    // The guide's import step points at the import row, which is near the end
+    // of a scrolling list, so scroll it into view.
     val step = TutorialStep.IMPORT_PAST
-    val showBeat3 = tutorial.showing(step)
+    val showImportStep = tutorial.showing(step)
     val listState = rememberLazyListState()
-    LaunchedEffect(showBeat3) {
-        if (!showBeat3) return@LaunchedEffect
-        // The guide usually arrives with this beat already current, so the first
-        // composition runs before layout and the item count is still zero — wait
-        // for it rather than silently skipping the scroll.
+    LaunchedEffect(showImportStep) {
+        if (!showImportStep) return@LaunchedEffect
+        // The step is often already current on the first composition, before the
+        // list has been laid out. Wait for items rather than skipping the scroll.
         val count = snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
-        // Second from the end: the trailing spacer is last. Derived rather than
-        // hard-coded so adding a data action above doesn't silently mis-aim this.
+        // Second from the end, because the spacer is last. Worked out rather than
+        // fixed, so adding a row above doesn't break it.
         listState.animateScrollToItem((count - 2).coerceAtLeast(0))
     }
 
@@ -138,7 +135,7 @@ fun DataScreen(
         }
 
         item {
-            InfoNote("Your data never leaves this device unless you export it here. There is no cloud sync — by design.")
+            InfoNote("Your data stays on this device unless you export it.")
         }
 
         item { Caption("Export data") }
@@ -158,7 +155,7 @@ fun DataScreen(
         }
         item {
             DataAction(
-                "Restore from backup", "Replace all data on this device",
+                "Restore from backup", "Merge a .ledger file into this device",
                 icon = Icons.Outlined.Restore,
             ) { restoreOpen.launch(arrayOf("*/*")) }
         }
@@ -171,16 +168,15 @@ fun DataScreen(
 
         item { Caption("Import past messages") }
         item {
-            // The scan runs in the background and reports through the status
-            // banner. The row itself carries the spinner, so the rest of the app
-            // stays usable while a long backfill finishes.
+            // The import runs in the background and reports through the status
+            // banner. The row shows a spinner, and the rest of the app stays usable.
             DataAction(
                 title = "Import past transactions",
                 subtitle = if (importing) "Scanning your inbox…"
-                else "Read existing alerts from trusted senders",
+                else "Read the alerts already in your inbox",
                 badge = "SMS",
                 busy = importing,
-                spotlit = showBeat3,
+                spotlit = showImportStep,
             ) {
                 if (importing) return@DataAction
                 if (CapturePermission.canReadInbox(context)) vm.importSms()
@@ -188,15 +184,16 @@ fun DataScreen(
             }
         }
 
-        // Room for the coach-mark to sit without covering the row it describes.
-        item { Spacer(Modifier.height(if (showBeat3) 250.dp else 90.dp)) }
+        // Room for the guide's card without covering the row it points at.
+        item { Spacer(Modifier.height(if (showImportStep) 250.dp else 90.dp)) }
     }
 
     if (askBackupPassphrase) {
         PassphraseDialog(
             title = "Encrypt backup",
-            message = "Choose a passphrase. You'll need it to restore — it can't be recovered.",
+            message = "Choose a passphrase. You'll need it to restore. It can't be recovered.",
             confirmLabel = "Choose file",
+            choosing = true,
             onConfirm = { pass ->
                 pendingBackupPassphrase = pass
                 askBackupPassphrase = false
@@ -207,39 +204,39 @@ fun DataScreen(
     }
 
     pendingRestoreUri?.let { uri ->
+        // A restore adds the backup's transactions to what is already here, and
+        // the dialog says so. Nothing on the device is removed, and a transaction
+        // in both is kept once.
         PassphraseDialog(
-            title = "Restore from backup?",
-            message = "This replaces everything currently on this device — it can't be undone. Enter the backup's passphrase.",
+            title = "Restore from backup",
+            message = "Enter the backup's passphrase. Nothing on this device is deleted.",
             confirmLabel = "Restore",
-            destructive = true,
             onConfirm = { pass ->
-                vm.importFrom(uri, passphrase = pass, replace = true)
+                vm.importFrom(uri, passphrase = pass, restoring = true)
                 pendingRestoreUri = null
             },
             onDismiss = { pendingRestoreUri = null },
         )
     }
 
-    // Beat 3 offers to start the import, and completes itself once a scan
-    // finishes — learned from a counter rather than by owning a modal. Gating it
-    // on "running" alone stalled the guide for anyone who never started an import.
+    // The import step offers to start an import, and completes when one
+    // finishes. It watches a counter of finished imports.
     LaunchedEffect(importsFinished) {
         if (importsFinished > 0 && tutorial.showing(step)) tutorialVm.complete(step)
     }
     Box(Modifier.fillMaxSize()) {
-        CoachScrim(showBeat3)
+        CoachScrim(showImportStep)
         CoachMarkHost(
-            visible = showBeat3,
+            visible = showImportStep,
             modifier = Modifier.align(Alignment.BottomCenter).padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
         ) {
             CoachMark(
                 label = coachLabel(step, if (tutorial.resumed) CoachTone.RESUMED else CoachTone.NORMAL),
                 title = step.title,
-                // The scan runs in the background, so the guide must not hold the
-                // user here until it lands. Once it's going, the primary becomes
-                // the way onward rather than disappearing.
+                // The import runs in the background, so the guide doesn't keep the user
+                // here. Once it starts, the main button moves the guide on.
                 body = if (importing)
-                    "It's reading your inbox in the background — you don't have to wait here."
+                    "This runs in the background."
                 else step.body,
                 primaryLabel = if (importing) "Next step" else step.primary,
                 onPrimary = {
@@ -262,16 +259,30 @@ fun DataScreen(
     }
 }
 
+/**
+ * @param choosing true when setting a new passphrase for a backup. It must be
+ *   at least [MIN_PASSPHRASE] characters and typed twice: a typo would make the
+ *   backup impossible to open, and a very short passphrase is easy to guess.
+ *   False when entering an existing passphrase to restore.
+ */
 @Composable
 private fun PassphraseDialog(
     title: String,
     message: String,
     confirmLabel: String,
-    destructive: Boolean = false,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
+    choosing: Boolean = false,
 ) {
     var passphrase by remember { mutableStateOf("") }
+    var repeat by remember { mutableStateOf("") }
+    val problem = when {
+        !choosing -> null
+        passphrase.length < MIN_PASSPHRASE -> "At least $MIN_PASSPHRASE characters."
+        repeat.isNotEmpty() && repeat != passphrase -> "The two don't match."
+        else -> null
+    }
+    val ready = if (choosing) passphrase.length >= MIN_PASSPHRASE && repeat == passphrase else passphrase.isNotEmpty()
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = LedgerPalette.Surface,
@@ -288,26 +299,53 @@ private fun PassphraseDialog(
                     placeholder = { Text("Passphrase") },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = LedgerPalette.SurfaceAlt,
-                        unfocusedContainerColor = LedgerPalette.SurfaceAlt,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                    ),
+                    colors = passphraseColors(),
                 )
+                if (choosing) {
+                    Spacer(Modifier.height(8.dp))
+                    TextField(
+                        value = repeat,
+                        onValueChange = { repeat = it },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        placeholder = { Text("Type it again") },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = passphraseColors(),
+                    )
+                    // Only show the problem once something is typed.
+                    if (passphrase.isNotEmpty() && problem != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(problem, style = MaterialTheme.typography.labelSmall, color = LedgerPalette.Spend)
+                    }
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { if (passphrase.isNotEmpty()) onConfirm(passphrase) }) {
-                Text(confirmLabel, color = if (destructive) LedgerPalette.Danger else LedgerPalette.Gold, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { if (ready) onConfirm(passphrase) }, enabled = ready) {
+                Text(
+                    confirmLabel,
+                    color = if (ready) LedgerPalette.Gold else LedgerPalette.InkMuted,
+                    fontWeight = FontWeight.Bold,
+                )
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = LedgerPalette.InkMuted) } },
     )
 }
 
-/** Matches [LedgerCard]'s radius so the guide's halo traces the row, not a box
- *  around it. */
+/** The shortest passphrase a new backup accepts. */
+private const val MIN_PASSPHRASE = 4
+
+@Composable
+private fun passphraseColors() = TextFieldDefaults.colors(
+    focusedContainerColor = LedgerPalette.SurfaceAlt,
+    unfocusedContainerColor = LedgerPalette.SurfaceAlt,
+    focusedIndicatorColor = Color.Transparent,
+    unfocusedIndicatorColor = Color.Transparent,
+)
+
+/** Matches [LedgerCard]'s corner radius, so the guide's highlight follows the row. */
 private val DataActionShape = RoundedCornerShape(16.dp)
 private val NoteShape = RoundedCornerShape(14.dp)
 
@@ -346,14 +384,12 @@ private fun StatusBanner(message: String, onDismiss: () -> Unit) {
 }
 
 /**
- * One row in the data list. The badge is either a short lettermark (CSV, JSON,
- * SMS) or a line icon — the file formats read as text, the actions as glyphs.
- * Deliberately not emoji: those render in their own colour and weight and sit
- * badly against the app's muted ink-on-paper palette.
+ * One row in the data list. The badge is a short label (CSV, JSON, SMS) for
+ * file formats, or a line icon for actions. No emoji, which would clash with
+ * the app's muted colours.
  *
- * [busy] swaps the chevron for a spinner, which is how a long-running action
- * shows progress in place instead of behind a modal. [spotlit] lifts the row out
- * of the setup guide's scrim, so what the user is told to tap is what they tap.
+ * [busy] replaces the arrow with a spinner, so a long action shows progress in
+ * place. [spotlit] highlights the row for the setup guide.
  */
 @Composable
 private fun DataAction(

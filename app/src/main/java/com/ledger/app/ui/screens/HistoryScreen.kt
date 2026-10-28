@@ -84,14 +84,14 @@ import java.time.format.DateTimeFormatter
 
 @Composable
 fun HistoryScreen(
-    onAddSender: () -> Unit = {},
-    onOpen: (Long) -> Unit = {},
+    onImport: () -> Unit = {},
+    onOpen: (TransactionEntity) -> Unit = {},
     vm: HistoryViewModel = hiltViewModel(),
     tutorialVm: TutorialViewModel = hiltViewModel(),
 ) {
     val tutorial by tutorialVm.state.collectAsStateWithLifecycle()
-    // Null until the first query returns — "no matches" and "not read yet" look
-    // identical as an empty list, and showing the former was a lie for a frame.
+    // Null until the first query returns, so "not loaded yet" isn't shown as
+    // "no matches".
     val results by vm.results.collectAsStateWithLifecycle()
     val rows = results.orEmpty()
     val loading = results == null
@@ -106,18 +106,17 @@ fun HistoryScreen(
     var pickingDateRange by remember { mutableStateOf(false) }
     var editingFilters by remember { mutableStateOf(false) }
 
-    // Day grouping walks the whole result set, so it is keyed to the results
-    // rather than left in the LazyColumn's content lambda, where it re-ran on
-    // every recomposition — including mid-scroll, over thousands of rows. Skipped
-    // outright when sorting by amount, which renders a flat list.
+    // Grouping by day walks every row, so it is remembered against the results
+    // instead of re-running on every recomposition. Sorting by amount shows a
+    // flat list and skips it.
     val grouped = remember(rows, filters.sort) {
         if (filters.sort == SortOrder.LARGEST) emptyList() else groupByDay(rows)
     }
 
-    // Beat 6 — explain the 90-day default, or an imported user reads the missing
-    // older rows as a failed import.
+    // The guide's history step explains the 90-day default, so older rows
+    // missing after an import aren't mistaken for a failed import.
     val step = TutorialStep.HISTORY_WINDOW
-    val showBeat6 = tutorial.showing(step) && !selectionMode && !pickingDateRange
+    val showHistoryStep = tutorial.showing(step) && !selectionMode && !pickingDateRange
 
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {
@@ -154,11 +153,11 @@ fun HistoryScreen(
                     rangeLabel = customRangeLabel(filters.customFrom, filters.customTo),
                     onPreset = vm::setDatePreset,
                     onPickRange = { pickingDateRange = true },
-                    spotlightPreset = if (showBeat6) DatePreset.LAST_90_DAYS else null,
+                    spotlightPreset = if (showHistoryStep) DatePreset.LAST_90_DAYS else null,
                 )
             }
-            // Everything chosen in the sheet stays visible — and individually
-            // removable — so a narrowed list is never unexplained.
+            // Every filter chosen in the sheet stays visible here and can be removed,
+            // so a narrowed list is always explained.
             if (filters.activeCount > 0) {
                 item { ActiveFilterRow(filters, senders, vm) }
             }
@@ -170,24 +169,23 @@ fun HistoryScreen(
                     val onlyDateNarrows = filters.query.isBlank() && filters.direction == null &&
                         filters.category == null && filters.institution == null && !filters.reviewOnly
                     when {
-                        // Nothing anywhere — the ledger really is empty.
+                        // No filters and all time: the ledger really is empty.
                         onlyDateNarrows && filters.datePreset == DatePreset.ALL_TIME -> EmptyState(
                             title = "No transactions yet",
-                            message = "As mobile-money SMS arrive, they'll be captured and listed here automatically.",
+                            message = "New alerts will appear here.",
                             modifier = Modifier.padding(top = 24.dp),
-                            actionLabel = "Add a sender",
-                            onAction = onAddSender,
+                            actionLabel = "Import past alerts",
+                            onAction = onImport,
                             illustration = { EnvelopeIllustration(EmptyBadge.Plus) },
                         )
-                        // Only the date window is narrowing things — offer to widen it
-                        // rather than implying there's no data at all.
+                        // Only the date window is narrowing the list, so offer to widen it.
                         onlyDateNarrows -> EmptyState(
                             title = "Nothing in this window",
                             message = "No transactions in ${
                                 customRangeLabel(filters.customFrom, filters.customTo)
                                     ?.takeIf { filters.datePreset == DatePreset.CUSTOM }
                                     ?: filters.datePreset.label.lowercase()
-                            }. Older ones are just outside this window.",
+                            }.",
                             modifier = Modifier.padding(top = 24.dp),
                             actionLabel = "Show all time",
                             onAction = { vm.setDatePreset(DatePreset.ALL_TIME) },
@@ -195,7 +193,7 @@ fun HistoryScreen(
                         )
                         else -> EmptyState(
                             title = "No matches",
-                            message = "Nothing here fits those filters. Try widening or clearing them.",
+                            message = "Nothing fits these filters.",
                             modifier = Modifier.padding(top = 24.dp),
                             actionLabel = "Clear filters",
                             onAction = { vm.onQueryChange(""); vm.clearFilters() },
@@ -204,7 +202,7 @@ fun HistoryScreen(
                     }
                 }
             } else if (filters.sort == SortOrder.LARGEST) {
-                // Amount ordering — a flat list reads better than day groups.
+                // Sorted by amount: a flat list reads better than day groups.
                 items(rows, key = { it.id }, contentType = { "txn" }) { txn ->
                     TxnRow(txn, selection, selectionMode, vm, onOpen)
                 }
@@ -217,13 +215,13 @@ fun HistoryScreen(
                 }
             }
 
-            item { Spacer(Modifier.height(if (showBeat6) 200.dp else 90.dp)) }
+            item { Spacer(Modifier.height(if (showHistoryStep) 200.dp else 90.dp)) }
         }
     }
 
-        CoachScrim(showBeat6)
+        CoachScrim(showHistoryStep)
         CoachMarkHost(
-            visible = showBeat6,
+            visible = showHistoryStep,
             modifier = Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
         ) {
             CoachMark(
@@ -276,7 +274,7 @@ fun HistoryScreen(
             onDismissRequest = { confirmingBulkDelete = false },
             containerColor = LedgerPalette.Surface,
             title = { Text("Delete ${selection.size} transaction${if (selection.size == 1) "" else "s"}?", style = MaterialTheme.typography.titleLarge) },
-            text = { Text("They'll be removed from this device. This can't be undone.", style = MaterialTheme.typography.bodyMedium, color = LedgerPalette.InkSoft) },
+            text = { Text("This can't be undone.", style = MaterialTheme.typography.bodyMedium, color = LedgerPalette.InkSoft) },
             confirmButton = {
                 androidx.compose.material3.TextButton(onClick = { confirmingBulkDelete = false; vm.deleteSelected() }) {
                     Text("Delete", color = LedgerPalette.Danger, fontWeight = FontWeight.Bold)
@@ -297,12 +295,12 @@ private fun TxnRow(
     selection: Set<Long>,
     selectionMode: Boolean,
     vm: HistoryViewModel,
-    onOpen: (Long) -> Unit,
+    onOpen: (TransactionEntity) -> Unit,
 ) {
     TransactionRow(
         txn = txn,
         selected = txn.id in selection,
-        onClick = { if (selectionMode) vm.toggleSelected(txn.id) else onOpen(txn.id) },
+        onClick = { if (selectionMode) vm.toggleSelected(txn.id) else onOpen(txn) },
         onLongClick = { vm.toggleSelected(txn.id) },
     )
 }
@@ -326,8 +324,10 @@ private fun SearchField(query: String, onChange: (String) -> Unit, modifier: Mod
     )
 }
 
-/** Date-window chips. "Custom" opens the calendar range picker; once a range is
- *  chosen the chip shows it, so the active window is always legible. */
+/**
+ * Date-window chips. "Custom" opens the date range picker, and once a range is
+ * chosen the chip shows it.
+ */
 @Composable
 private fun DateRow(
     preset: DatePreset,
@@ -351,8 +351,10 @@ private fun DateRow(
     }
 }
 
-/** Opens the filter sheet. Carries a count so a narrowed list is obvious even
- *  after the summary row has scrolled away. */
+/**
+ * Opens the filter sheet. It shows a count, so a narrowed list is obvious even
+ * after the summary row has scrolled away.
+ */
 @Composable
 private fun FilterButton(count: Int, onClick: () -> Unit) {
     val active = count > 0
@@ -421,7 +423,7 @@ private fun ActiveFilterRow(filters: HistoryFilters, senders: List<SenderOption>
     }
 }
 
-/** Hoisted: chips are re-created on every filter change and every scroll frame. */
+/** Kept outside the composable so it isn't recreated for every chip. */
 private val PillShape = RoundedCornerShape(20.dp)
 
 @Composable
@@ -452,12 +454,11 @@ private fun RemovableChip(label: String, onRemove: () -> Unit) {
 }
 
 /**
- * Everything that narrows the list apart from the date window and the search
- * box. Four rows of chips on the screen itself buried the transactions they were
- * meant to help find, so they live here and the screen keeps only what's active.
+ * Every filter except the date window and the search box, which stay on the
+ * screen. Keeping these in a sheet leaves the screen for the transactions.
  *
- * Choices apply live — the footer counts the matches as you tap, so the sheet
- * needs no Apply step, only a way out.
+ * Choices apply straight away and the footer counts the matches, so there is
+ * no Apply button, only a way to close.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -512,8 +513,8 @@ private fun FilterSheet(
                 Chip(MONEY_OUT, filters.direction == "DEBIT") { vm.toggleDirection("DEBIT") }
             }
 
-            // Shown for a single sender too: it's how you confirm which provider a
-            // row came from, and hiding it read as the filter not existing at all.
+            // Shown even with a single provider, so the user can see which provider
+            // their rows come from.
             if (senders.isNotEmpty()) {
                 FilterSection("Sender") {
                     senders.forEach { s ->
@@ -628,9 +629,9 @@ private fun SelectionBar(count: Int, onClear: () -> Unit, onCategorise: () -> Un
     }
 }
 
-// Groups a date-sorted list into (Today / Yesterday / "Wed 16 Jul") sections,
-// preserving the incoming order. Days outside the current year carry the year,
-// so a backfill of old messages never reads as recent.
+// Groups a date-sorted list into sections (Today, Yesterday, "Wed 16 Jul"),
+// keeping the order. Days from another year show the year, so old imported
+// messages never look recent.
 private val groupFmt = DateTimeFormatter.ofPattern("EEE d MMM").withZone(ZoneId.systemDefault())
 private val groupFmtWithYear = DateTimeFormatter.ofPattern("EEE d MMM yyyy").withZone(ZoneId.systemDefault())
 

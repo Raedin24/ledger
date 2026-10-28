@@ -11,26 +11,28 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface TransactionDao {
 
-    /** IGNORE on conflict = the unique dedupKey index silently drops duplicate
-     *  broadcasts. Returns -1 when the row was a duplicate and not inserted. */
+    /**
+     * Duplicates are dropped by the unique dedupKey index. Returns -1 when the row
+     * was a duplicate and wasn't inserted.
+     */
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIgnoringDuplicates(txn: TransactionEntity): Long
 
     /**
-     * The balance this institution last reported at or before [at], for the
-     * balance-chain check in the repository. Ordered by capture as well as
-     * occurrence so two messages sharing a timestamp resolve deterministically.
+     * The balance this provider last reported at or before [at], for the balance
+     * check in the repository. Ties on time are broken by capture order, so the
+     * result is always the same.
      */
     @Query(
         """
-        SELECT balanceMinor FROM transactions
+        SELECT balanceMinor, chainBreak, needsReview FROM transactions
         WHERE institution = :institution AND balanceMinor IS NOT NULL
           AND occurredAt <= :at
         ORDER BY occurredAt DESC, capturedAt DESC, id DESC
         LIMIT 1
         """
     )
-    suspend fun lastBalanceBefore(institution: String, at: Long): Long?
+    suspend fun lastBalanceBefore(institution: String, at: Long): BalanceAnchor?
 
     @Update
     suspend fun update(txn: TransactionEntity)
@@ -47,11 +49,68 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE id IN (:ids)")
     suspend fun getByIds(ids: List<Long>): List<TransactionEntity>
 
-    @Query("DELETE FROM transactions")
-    suspend fun clearAll()
+    @Query("SELECT * FROM transactions WHERE dedupKey = :key LIMIT 1")
+    suspend fun findByDedupKey(key: String): TransactionEntity?
 
-    @Query("SELECT dedupKey FROM transactions")
-    suspend fun allDedupKeys(): List<String>
+    @Query("DELETE FROM transactions WHERE dedupKey IN (:keys)")
+    suspend fun deleteByDedupKeys(keys: List<String>)
+
+    /**
+     * Wallet rows whose cash entry is gone go back to "not moved", and back into
+     * the review queue to be filed again.
+     */
+    @Query(
+        """
+        UPDATE transactions SET cashMove = 'KEPT', needsReview = 1
+        WHERE dedupKey IN (:sourceKeys) AND cashMove = 'MOVED'
+        """
+    )
+    suspend fun unmoveCash(sourceKeys: List<String>)
+
+    /**
+     * Marks every wallet row that has a cash entry as moved. A restore can bring
+     * in the cash entry while skipping the wallet row as a duplicate, and an
+     * unmarked wallet row would count the money twice.
+     */
+    @Query(
+        """
+        UPDATE transactions SET cashMove = 'MOVED', needsReview = 0
+        WHERE cashMove IS NOT 'MOVED'
+          AND 'CASH|' || dedupKey IN (SELECT dedupKey FROM transactions WHERE cashMove = 'PAIR')
+        """
+    )
+    suspend fun linkMovedCash()
+
+    /** Flags an existing row as a possible cash movement, unless it was already answered. */
+    @Query(
+        """
+        UPDATE transactions SET cashMove = 'OFFER', needsReview = 1
+        WHERE dedupKey = :key AND cashMove IS NULL AND selfTransfer = 0
+        """
+    )
+    suspend fun offerCash(key: String)
+
+    /** Cash on hand: everything that came into cash minus everything that left. */
+    @Query(
+        """
+        SELECT COALESCE(SUM(CASE direction WHEN 'CREDIT' THEN amountMinor ELSE -amountMinor END), 0)
+        FROM transactions WHERE institution = 'CASH'
+        """
+    )
+    fun observeCashBalance(): Flow<Long>
+
+    /** [observeCashBalance], once. */
+    @Query(
+        """
+        SELECT COALESCE(SUM(CASE direction WHEN 'CREDIT' THEN amountMinor ELSE -amountMinor END), 0)
+        FROM transactions WHERE institution = 'CASH'
+        """
+    )
+    suspend fun cashBalance(): Long
+
+    /** The cash ledger, newest first. */
+    @Query("SELECT * FROM transactions WHERE institution = 'CASH' ORDER BY occurredAt DESC, id DESC")
+    fun observeCash(): Flow<List<TransactionEntity>>
 
     @Query("SELECT * FROM transactions ORDER BY occurredAt DESC")
     suspend fun getAll(): List<TransactionEntity>
@@ -59,8 +118,10 @@ interface TransactionDao {
     @Query("SELECT COUNT(*) FROM transactions")
     suspend fun count(): Int
 
-    /** Whether the ledger has ever captured anything. Drives the first-run
-     *  welcome, which must not depend on the *current month* having activity. */
+    /**
+     * Whether anything has ever been captured. Drives the first-run welcome, which
+     * must not depend on the current month having activity.
+     */
     @Query("SELECT COUNT(*) FROM transactions")
     fun observeCount(): Flow<Int>
 
@@ -70,25 +131,32 @@ interface TransactionDao {
     @Query("SELECT COUNT(*) FROM transactions WHERE needsReview = 1")
     fun observeReviewCount(): Flow<Int>
 
+    /** Queued rows dated before [before]: what "clear older" would release. */
+    @Query("SELECT COUNT(*) FROM transactions WHERE needsReview = 1 AND occurredAt < :before")
+    fun observeReviewCountBefore(before: Long): Flow<Int>
+
+    /**
+     * Takes rows out of the review queue without filing them: they stay in the
+     * ledger, uncategorised, and any open cash question is answered "no".
+     * [before] null clears the whole queue.
+     */
+    @Query(
+        """
+        UPDATE transactions
+        SET needsReview = 0,
+            cashMove = CASE WHEN cashMove = 'OFFER' THEN 'KEPT' ELSE cashMove END
+        WHERE needsReview = 1 AND (:before IS NULL OR occurredAt < :before)
+        """
+    )
+    suspend fun clearReview(before: Long?): Int
+
     @Query("SELECT * FROM transactions ORDER BY occurredAt DESC LIMIT :limit")
     fun observeRecent(limit: Int): Flow<List<TransactionEntity>>
 
-    @Query(
-        """
-        SELECT * FROM transactions
-        WHERE (:query = '' OR counterparty LIKE '%' || :query || '%'
-               OR notes LIKE '%' || :query || '%'
-               OR referenceHint LIKE '%' || :query || '%'
-               OR category LIKE '%' || :query || '%')
-        ORDER BY occurredAt DESC
-        """
-    )
-    fun search(query: String): Flow<List<TransactionEntity>>
-
     /**
-     * Filtered + sorted history, done entirely in SQL so the (potentially large)
-     * result set is never sorted or filtered on the main thread. Every filter is
-     * nullable / opt-out; [sort] is one of "NEWEST" / "OLDEST" / "LARGEST".
+     * Filtered and sorted history. It all runs in SQL, so a large result is never
+     * processed on the main thread. Every filter is optional. [sort] is "NEWEST",
+     * "OLDEST" or "LARGEST".
      */
     @Query(
         """
@@ -120,17 +188,14 @@ interface TransactionDao {
         sort: String,
     ): Flow<List<TransactionEntity>>
 
-    /** Distinct institutions that actually appear in the ledger — powers the
-     *  History "sender" filter chips (only senders you have data from). */
+    /** Providers that appear in the ledger, for the History filter chips. */
     @Query("SELECT DISTINCT institution FROM transactions ORDER BY institution ASC")
     fun observeInstitutions(): Flow<List<String>>
 
     /**
-     * Retroactively applies a freshly-created rule to the transactions still
-     * waiting in the review queue for the same sender + direction. This is what
-     * makes "always sort this sender this way" clear the backlog instead of
-     * leaving every past message to be reviewed one by one. EXACT (case-
-     * insensitive) counterparty match mirrors how a learned Rule matches live.
+     * Applies a new rule to the rows still waiting in review for the same sender
+     * and direction, so the user doesn't have to sort each past message by hand.
+     * The counterparty match is exact but ignores case, the same as a live rule.
      */
     @Query(
         """
@@ -139,6 +204,7 @@ interface TransactionDao {
         WHERE needsReview = 1
           AND direction = :direction
           AND counterparty = :counterparty COLLATE NOCASE
+          AND cashMove IS NOT 'OFFER'
         """
     )
     suspend fun applyRuleToPending(
@@ -149,17 +215,14 @@ interface TransactionDao {
     ): Int
 
     /**
-     * Spend/receive total for a window.
+     * Money in or money out for a window.
      *
-     * A self-transfer moves the user's own money between their own accounts, so
-     * it contributes only whatever the provider charged for it — never the
-     * transferred amount itself.
+     * A self-transfer moves money between the user's own accounts, so only its fee
+     * counts, never the amount moved.
      *
-     * Every other debit contributes its amount **plus** its fee. The parser holds
-     * the two apart on purpose (`transactionAmount` skips the span the fee match
-     * occupies), so `amountMinor` is always net of the charge and summing it
-     * alone quietly understated spending by every fee ever paid. Credits take the
-     * amount alone: money coming in is not charged at the receiving end.
+     * Any other debit counts its amount plus its fee. The parser stores the two
+     * separately, so `amountMinor` never includes the fee. Credits count the amount
+     * alone, because receiving money isn't charged.
      */
     @Query(
         """
@@ -175,20 +238,24 @@ interface TransactionDao {
     fun observeTotal(direction: String, from: Long, to: Long): Flow<Long>
 
     /**
-     * Re-marks every transaction against the current set of own accounts. Run
-     * after the user adds or removes one of their own numbers or names, so the
-     * change applies to history and not just to messages captured from now on.
+     * Re-marks every transaction against the current list of own accounts. Run
+     * after the user adds or removes one, so the change also applies to history.
      *
-     * Mirrors [com.ledger.domain.model.OwnAccountMatcher]'s three routes — the
-     * counterparty *is* the number, the counterparty is a registered *name*, or
-     * the number rides in the narration — so a row marked live and the same row
-     * re-marked here always agree. Name matching is intentionally not scoped by
-     * institution; see the matcher for why.
+     * A move to or from cash is a self-transfer because the user said so, whatever
+     * the account list says. Any other cash row is real spending or income.
+     *
+     * Otherwise this follows the same three checks as
+     * [com.ledger.domain.model.OwnAccountMatcher]: the counterparty is the number,
+     * the counterparty is one of the account's names, or the number appears in the
+     * narration. That keeps a row marked here in agreement with how it was marked
+     * when captured. Name matching ignores the provider; the matcher explains why.
      */
     @Query(
         """
         UPDATE transactions
         SET selfTransfer = CASE
+            WHEN cashMove IN ('MOVED', 'PAIR', 'OPENING') THEN 1
+            WHEN institution = 'CASH' THEN 0
             WHEN counterpartyKey IS NOT NULL AND counterpartyKey <> ''
              AND counterpartyKey IN (SELECT key FROM own_accounts) THEN 1
             WHEN counterparty IS NOT NULL
@@ -204,10 +271,8 @@ interface TransactionDao {
     suspend fun recomputeSelfTransfers(): Int
 
     /**
-     * Files self-transfers still sitting in the review queue under "Transfers".
-     * Scoped to `needsReview = 1` so a category the user picked deliberately is
-     * never overwritten — this only clears the backlog they'd otherwise have to
-     * sort by hand.
+     * Files self-transfers still waiting in review under "Transfers". Only queued
+     * rows are touched, so a category the user picked is never overwritten.
      */
     @Query(
         """
@@ -217,35 +282,35 @@ interface TransactionDao {
     )
     suspend fun fileSelfTransfers(category: String): Int
 
-    /** Ids + counterparties for rows captured before `counterpartyKey` existed.
-     *  Narrow projection so the one-off backfill stays cheap. */
+    /** Rows with no `counterpartyKey` yet, for the key backfill. */
     @Query("SELECT id, counterparty FROM transactions WHERE counterpartyKey IS NULL")
     suspend fun rowsMissingCounterpartyKey(): List<CounterpartyRow>
 
-    /** Writes the canonical key ("" when the counterparty holds no number, so the
-     *  backfill never re-visits the row). */
+    /**
+     * Writes the normalised account number. It is "" when the counterparty has no
+     * number, so the backfill doesn't visit the row again.
+     */
     @Query("UPDATE transactions SET counterpartyKey = :key WHERE id = :id")
     suspend fun setCounterpartyKey(id: Long, key: String)
 
-    /** Ids + narrations for rows captured before `referenceKeys` existed. */
+    /** Rows with no `referenceKeys` yet, for the key backfill. */
     @Query("SELECT id, referenceHint FROM transactions WHERE referenceKeys IS NULL")
     suspend fun rowsMissingReferenceKeys(): List<ReferenceHintRow>
 
-    /** Writes the pipe-delimited key set ("" when the narration held no number,
-     *  so the backfill never re-visits the row). */
+    /**
+     * Writes the numbers found in the narration, separated by pipes. It is "" when
+     * there were none, so the backfill doesn't visit the row again.
+     */
     @Query("UPDATE transactions SET referenceKeys = :keys WHERE id = :id")
     suspend fun setReferenceKeys(id: Long, keys: String)
 
     /**
-     * Self-transfer *amounts* are excluded outright — moving your own money isn't
-     * spend in any category. Their fees are not: those are charges like any other
-     * and land in the synthetic "Transaction Fees" row alongside the rest.
+     * The dashboard's top categories.
      *
-     * Fees are pooled into that one row rather than added to the category that
-     * incurred them. Charges are their own kind of outgoing — the question they
-     * answer is "what is this costing me to move?", which is worth a line of its
-     * own and would be invisible smeared a few pesewas at a time across Groceries
-     * and Transport.
+     * Self-transfer amounts are left out, since moving your own money isn't
+     * spending. Their fees are included. All fees are grouped into one
+     * "Transaction Fees" row instead of being added to each category, so the user
+     * can see what moving money costs them.
      */
     @Query(
         """
@@ -268,19 +333,13 @@ interface TransactionDao {
     fun observeTopCategories(from: Long, to: Long, limit: Int): Flow<List<CategoryTotal>>
 
     /**
-     * Every category for one direction in a window — the full breakdown behind
-     * the dashboard's top five. Unlike [observeTopCategories] this keeps
-     * uncategorised rows (as an empty label) rather than dropping them, because a
-     * breakdown that silently omits part of the total doesn't add up.
+     * Every category for one direction in a window: the full breakdown behind the
+     * dashboard's top five. Unlike [observeTopCategories], uncategorised rows are
+     * kept (with an empty label), so the slices add up to the total.
      *
-     * On the debit side that now holds exactly: category amounts plus the pooled
-     * "Transaction Fees" row sum to the Money Out figure [observeTotal] reports,
-     * self-transfer fees included. It did not before — the fees were in the total
-     * and in no slice.
-     *
-     * The outer regroup is not redundant: it folds the fee row into a real
-     * category should the user ever create one by the same name, rather than
-     * listing the label twice.
+     * On the money-out side, the categories plus the "Transaction Fees" row add up
+     * to [observeTotal]. The outer GROUP BY merges the fee row into a real category
+     * if the user ever creates one with the same name.
      */
     @Query(
         """
@@ -306,8 +365,8 @@ interface TransactionDao {
     fun observeCategoryBreakdown(direction: String, from: Long, to: Long): Flow<List<CategorySlice>>
 
     /**
-     * Per-day spend/receive buckets for the cash-flow timeline. Days are bucketed
-     * in the device's local zone (`occurredAt` is epoch millis → seconds for
+     * Money in and money out per day, for the cash-flow timeline. Days use the
+     * device's time zone (`occurredAt` is epoch millis, converted to seconds for
      * SQLite's date functions). Only days with activity are returned; the caller
      * fills the gaps.
      */
@@ -338,15 +397,24 @@ interface TransactionDao {
     fun observeLargestExpenses(from: Long, to: Long, limit: Int): Flow<List<TransactionEntity>>
 }
 
+/** A label in use that the category list is missing. See [CategoryDao.orphaned]. */
+data class OrphanCategory(val name: String, val kind: String)
+
+/** The row a new message's balance is checked against. See [TransactionDao.lastBalanceBefore]. */
+data class BalanceAnchor(val balanceMinor: Long, val chainBreak: Boolean, val needsReview: Boolean) {
+    /** A row whose own balance broke the chain, not yet confirmed or cleared. */
+    val untrusted: Boolean get() = chainBreak && needsReview
+}
+
 data class CategoryTotal(val label: String, val totalMinor: Long)
 
 /** One slice of a full breakdown. [label] is empty for uncategorised rows. */
 data class CategorySlice(val label: String, val totalMinor: Long, val txnCount: Int)
 
-/** Narrow projection for the one-off `counterpartyKey` backfill. */
+/** Just the columns the `counterpartyKey` backfill needs. */
 data class CounterpartyRow(val id: Long, val counterparty: String?)
 
-/** Narrow projection for the one-off `referenceKeys` backfill. */
+/** Just the columns the `referenceKeys` backfill needs. */
 data class ReferenceHintRow(val id: Long, val referenceHint: String?)
 
 @Dao
@@ -360,9 +428,10 @@ interface OwnAccountDao {
     @Query("SELECT key FROM own_accounts")
     suspend fun keys(): List<String>
 
-    /** The existing row for this wallet, so re-adding it edits rather than
-     *  duplicates. Scoped by provider — the same number under a *different*
-     *  provider is a different wallet and must get its own row. */
+    /**
+     * The existing row for this wallet, so adding it again edits it. The same
+     * number with a different provider is a different wallet.
+     */
     @Query("SELECT id FROM own_accounts WHERE key = :key AND institution = :institution LIMIT 1")
     suspend fun idFor(key: String, institution: String): Long?
 
@@ -371,9 +440,6 @@ interface OwnAccountDao {
 
     @Query("DELETE FROM own_accounts WHERE id = :id")
     suspend fun delete(id: Long)
-
-    @Query("DELETE FROM own_accounts")
-    suspend fun clearAll()
 }
 
 @Dao
@@ -390,13 +456,9 @@ interface OwnAccountNameDao {
     @Upsert
     suspend fun upsert(name: OwnAccountNameEntity)
 
-    /** Replaces one account's whole alias set — the edit dialog hands back the
-     *  full list, so removed names must actually disappear. */
+    /** Clears an account's names before the edit dialog's full list is saved. */
     @Query("DELETE FROM own_account_names WHERE accountId = :accountId")
     suspend fun deleteForAccount(accountId: Long)
-
-    @Query("DELETE FROM own_account_names")
-    suspend fun clearAll()
 }
 
 /** One day's totals in the cash-flow timeline. `day` is `YYYY-MM-DD` (local). */
@@ -410,9 +472,11 @@ interface RuleDao {
     @Query("SELECT * FROM rules ORDER BY priority DESC, id ASC")
     fun observeAll(): Flow<List<RuleEntity>>
 
-    /** Existing rule for a {counterparty, direction} pair, if any — used to
-     *  dedup so confirming a second message from the same sender updates the
-     *  rule instead of inserting a duplicate. EXACT (case-insensitive) match. */
+    /**
+     * The existing rule for a counterparty and direction, if any, so confirming
+     * another message from the same sender updates it instead of adding a second
+     * one. Exact match, ignoring case.
+     */
     @Query("SELECT * FROM rules WHERE counterparty = :counterparty COLLATE NOCASE AND direction = :direction LIMIT 1")
     suspend fun findFor(counterparty: String, direction: String): RuleEntity?
 
@@ -424,24 +488,6 @@ interface RuleDao {
 
     @Query("DELETE FROM rules WHERE id = :id")
     suspend fun delete(id: Long)
-
-    @Query("DELETE FROM rules")
-    suspend fun clearAll()
-}
-
-@Dao
-interface SenderDao {
-    @Query("SELECT * FROM senders")
-    fun observeAll(): Flow<List<SenderEntity>>
-
-    @Query("SELECT * FROM senders WHERE liveCaptureEnabled = 1")
-    suspend fun enabled(): List<SenderEntity>
-
-    @Upsert
-    suspend fun upsert(sender: SenderEntity)
-
-    @Query("DELETE FROM senders WHERE institution = :institution")
-    suspend fun delete(institution: String)
 }
 
 @Dao
@@ -464,12 +510,39 @@ interface CategoryDao {
     @Query("SELECT * FROM categories WHERE name = :name COLLATE NOCASE LIMIT 1")
     suspend fun findByName(name: String): CategoryEntity?
 
+    /**
+     * Labels still used by a transaction, rule or budget that the category list no
+     * longer has, with the side they were used on. The "Transaction Fees" row is
+     * computed rather than stored, so it is left out.
+     */
+    @Query(
+        """
+        SELECT name,
+               CASE WHEN MAX(isOut) = 1 AND MAX(isIn) = 1 THEN 'SHARED'
+                    WHEN MAX(isIn) = 1 THEN 'IN' ELSE 'OUT' END AS kind
+        FROM (
+            SELECT category AS name, direction = 'DEBIT' AS isOut, direction = 'CREDIT' AS isIn
+            FROM transactions WHERE category IS NOT NULL
+            UNION ALL
+            SELECT category, direction = 'DEBIT', direction = 'CREDIT' FROM rules
+            UNION ALL
+            SELECT category, 1, 0 FROM budgets
+        )
+        WHERE TRIM(name) <> '' AND name <> 'Transaction Fees'
+          AND LOWER(name) NOT IN (SELECT LOWER(name) FROM categories)
+        GROUP BY LOWER(name)
+        ORDER BY name
+        """
+    )
+    suspend fun orphaned(): List<OrphanCategory>
+
     @Upsert
     suspend fun upsert(category: CategoryEntity): Long
 
-    /** One statement batch in one transaction — a drag-and-drop reorder renumbers
-     *  most of the table at once, and row-at-a-time upserts would have the
-     *  observers fire on every intermediate order. */
+    /**
+     * Saves many rows in one transaction. A reorder renumbers most of the table,
+     * and saving row by row would refresh the screen at every step.
+     */
     @Upsert
     suspend fun upsertAll(categories: List<CategoryEntity>)
 
@@ -478,7 +551,27 @@ interface CategoryDao {
 
     @Query("DELETE FROM categories WHERE id = :id")
     suspend fun delete(id: Long)
+}
 
-    @Query("DELETE FROM categories")
-    suspend fun clearAll()
+/**
+ * The monthly limits, one row per budgeted category. The table is small, so it
+ * is read whole and matched to the month's spending in Kotlin. That reuses the
+ * spending query instead of repeating its date logic in SQL.
+ */
+@Dao
+interface BudgetDao {
+    @Query("SELECT * FROM budgets ORDER BY category ASC")
+    fun observeAll(): Flow<List<BudgetEntity>>
+
+    @Query("SELECT * FROM budgets ORDER BY category ASC")
+    suspend fun getAll(): List<BudgetEntity>
+
+    @Query("SELECT * FROM budgets WHERE category = :category LIMIT 1")
+    suspend fun find(category: String): BudgetEntity?
+
+    @Upsert
+    suspend fun upsert(budget: BudgetEntity)
+
+    @Query("DELETE FROM budgets WHERE category = :category")
+    suspend fun delete(category: String)
 }

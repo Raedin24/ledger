@@ -19,6 +19,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,7 +55,7 @@ import com.ledger.app.ui.components.reorderableItem
 import com.ledger.app.ui.theme.LedgerPalette
 import com.ledger.app.ui.vm.CategoriesViewModel
 
-/** The kinds, in the order the screen lists them: out, both, in. */
+/** The sides in the order the screen lists them: out, both, in. */
 private val KIND_ORDER = CategoryKind.DISPLAY_ORDER
 
 private val KIND_BLURB = mapOf(
@@ -62,7 +64,7 @@ private val KIND_BLURB = mapOf(
     CategoryKind.IN to "Offered when you sort money coming in.",
 )
 
-/** Options for the side-of-the-ledger control, shared by add and edit. */
+/** Options for the side control, shared by the add and edit dialogs. */
 private val KIND_OPTIONS = KIND_ORDER.map { it.name to it.label }
 
 @Composable
@@ -72,36 +74,33 @@ fun CategoriesScreen(
     vm: CategoriesViewModel = hiltViewModel(),
 ) {
     val categories by vm.categories.collectAsStateWithLifecycle()
+    val restored by vm.restored.collectAsStateWithLifecycle()
     var newName by remember { mutableStateOf("") }
     var newKind by remember { mutableStateOf(CategoryKind.OUT) }
     var editing by remember { mutableStateOf<CategoryEntity?>(null) }
 
-    // The order on screen. Seeded from the database and reordered locally as a
-    // row is dragged across its neighbours, so the list keeps up with the finger;
-    // the result is written once, when the finger lifts.
+    // The order on screen. It starts from the database and is reordered here
+    // while a row is dragged, then saved once when the finger lifts.
     var order by remember { mutableStateOf(categories) }
     val listState = rememberLazyListState()
     val reorder = rememberReorderState(
         listState = listState,
-        // Only rows may be displaced, and only by a row from the same side of the
-        // ledger — a category dragged across a section boundary would appear to
-        // change kind, which is what the edit dialog is for. Section headers are
-        // keyed by string and fail this on the first test.
+        // A row can only swap with a row on the same side. Dragging across a
+        // section would look like changing the side, which the edit dialog is for.
+        // Section headers have string keys and fail this check.
         canDrop = { from, to ->
             from is Long && to is Long && order.kindOf(from) == order.kindOf(to)
         },
         onMove = { from, to -> order = order.moveBefore(from, to) },
     )
 
-    // Adopt whatever the database says whenever we aren't mid-drag; taking it
-    // during a drag would yank the row out from under the finger on the first
-    // unrelated write (a rename, a switch flipped elsewhere).
+    // Take the database order whenever no drag is in progress. Taking it during
+    // a drag would move the row out from under the finger.
     LaunchedEffect(categories) {
         if (reorder.draggingKey == null) order = categories
     }
 
-    // Grouped once per change rather than inside the list's content lambda, which
-    // would re-partition the whole set on every scroll frame.
+    // Grouped once per change, not on every scroll frame.
     val bySide = remember(order) { order.groupBy { CategoryKind.from(it.kind) } }
 
     LazyColumn(
@@ -113,17 +112,13 @@ fun CategoriesScreen(
             Spacer(Modifier.height(18.dp))
             ScreenHeader("Categories", onBack)
             Text(
-                "The labels you sort transactions into. Money in and money out " +
-                    "get their own sets, so a payment is never offered \"Salary\" " +
-                    "and a deposit is never offered \"Rent\". Drag a row by its " +
-                    "handle to reorder — the first few are the ones Review offers " +
-                    "you without opening the picker.",
+                "Star the ones you use most. Switch one off to hide it. Drag to reorder.",
                 style = MaterialTheme.typography.bodyMedium, color = LedgerPalette.InkMuted,
             )
-            // Turning thirty labels on and off one switch at a time is the slow
-            // way round; the setup screen does the same job as one pass.
+            // The setup screen picks favourites in one go, faster than starring rows
+            // one at a time.
             Text(
-                "Pick your usual categories",
+                "Pick your top categories",
                 style = MaterialTheme.typography.labelLarge,
                 color = LedgerPalette.Gold,
                 fontWeight = FontWeight.SemiBold,
@@ -132,9 +127,22 @@ fun CategoriesScreen(
                     .clickable(onClick = onPickUsual)
                     .padding(vertical = 6.dp),
             )
+            Text(
+                when (restored) {
+                    null -> "Restore default categories"
+                    0 -> "All default categories are here"
+                    1 -> "Restored 1 category"
+                    else -> "Restored $restored categories"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = if (restored == null) LedgerPalette.Gold else LedgerPalette.InkMuted,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clickable(enabled = restored == null, onClick = vm::restoreDefaults)
+                    .padding(vertical = 6.dp),
+            )
         }
 
-        // Add a new category
         item {
             LedgerCard {
                 Text("Add a category", style = MaterialTheme.typography.titleMedium)
@@ -192,8 +200,8 @@ fun CategoriesScreen(
                 }
             } else {
                 items(rows, key = { it.id }, contentType = { "category-row" }) { cat ->
-                    // Position within its own side — the accessibility move
-                    // actions step past the neighbour the user can actually see.
+                    // Position within its own side, so the accessibility move actions step
+                    // past the neighbour the user can see.
                     val index = rows.indexOfFirst { it.id == cat.id }
                     CategoryRow(
                         category = cat,
@@ -204,6 +212,7 @@ fun CategoriesScreen(
                         onMove = { delta -> vm.move(cat, delta) },
                         onDrop = { vm.reorder(order.map { it.id }) },
                         onEnabled = { vm.setEnabled(cat, it) },
+                        onFavorite = { vm.setFavorite(cat, it) },
                         onDelete = { vm.delete(cat) },
                     )
                 }
@@ -235,14 +244,15 @@ private fun CategoryRow(
     onMove: (Int) -> Unit,
     onDrop: () -> Unit,
     onEnabled: (Boolean) -> Unit,
+    onFavorite: (Boolean) -> Unit,
     onDelete: () -> Unit,
 ) {
     val dragging = reorder.draggingKey == category.id
     Box(Modifier.reorderableItem(reorder, category.id)) {
         LedgerCard(padding = PaddingValues(12.dp, 8.dp), elevation = if (dragging) 10.dp else 0.dp) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                // Grab first, in reading order and under the thumb: a handle at the
-                // end of a row this crowded is a hard target next to Delete.
+                // The handle comes first, under the thumb. At the end of this busy row it
+                // would sit right next to Delete.
                 Icon(
                     Icons.Default.DragHandle,
                     contentDescription = "Reorder ${category.name}",
@@ -250,8 +260,7 @@ private fun CategoryRow(
                     modifier = Modifier
                         .size(34.dp)
                         .dragHandle(reorder, category.id, onDrop)
-                        // Dragging is unavailable to a screen reader, so the
-                        // handle carries the one-slot moves the arrows used to.
+                        // Screen readers can't drag, so the handle offers one-step move actions.
                         .semantics {
                             customActions = buildList {
                                 if (canMoveUp) add(CustomAccessibilityAction("Move up") { onMove(-1); true })
@@ -269,9 +278,29 @@ private fun CategoryRow(
                         color = if (category.enabled) LedgerPalette.Ink else LedgerPalette.InkMuted,
                     )
                     Text(
-                        if (category.enabled) "Tap to rename or move sides" else "Hidden from pickers",
+                        when {
+                            !category.enabled -> "Hidden"
+                            category.favorite -> "Starred · tap to edit"
+                            else -> "Tap to edit"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = LedgerPalette.InkMuted,
+                    )
+                }
+                // The star and the switch mean different things ("do I use this a lot?"
+                // and "should this show at all?"), so they stay separate controls.
+                IconButton(
+                    onClick = { onFavorite(!category.favorite) },
+                    modifier = Modifier.size(34.dp),
+                ) {
+                    Icon(
+                        if (category.favorite) Icons.Default.Star else Icons.Outlined.StarBorder,
+                        contentDescription = if (category.favorite) {
+                            "Remove ${category.name} from the ones offered up front"
+                        } else {
+                            "Offer ${category.name} up front"
+                        },
+                        tint = if (category.favorite) LedgerPalette.Gold else LedgerPalette.InkMuted,
                     )
                 }
                 Switch(
@@ -292,11 +321,10 @@ private fun List<CategoryEntity>.kindOf(id: Long): String? =
     firstOrNull { it.id == id }?.kind
 
 /**
- * Moves the row [from] to the slot the row [to] currently occupies.
+ * Moves the row [from] to the slot the row [to] is in.
  *
- * Both rows are always in the same section (the drag can't cross one), so taking
- * the row out and putting it back at the target's index lands it next to the row
- * it was dropped on in the grouped view as well as in this flat list.
+ * Both rows are always in the same section, so this puts the row next to the
+ * one it was dropped on, both in this flat list and in the grouped view.
  */
 private fun List<CategoryEntity>.moveBefore(from: Any, to: Any): List<CategoryEntity> {
     val i = indexOfFirst { it.id == from }
@@ -306,11 +334,8 @@ private fun List<CategoryEntity>.moveBefore(from: Any, to: Any): List<CategoryEn
 }
 
 /**
- * Rename a category and/or move it to the other side of the ledger.
- *
- * Both live in one dialog because they are the same decision from the user's
- * point of view — "this label is wrong for what I'm sorting" — and splitting them
- * would need two more affordances in an already-crowded row.
+ * Renames a category or moves it to the other side, or both. They share one
+ * dialog because to the user they are the same fix: this label is wrong.
  */
 @Composable
 private fun CategoryEditDialog(
@@ -341,10 +366,10 @@ private fun CategoryEditDialog(
                     color = LedgerPalette.InkMuted,
                 )
                 Spacer(Modifier.height(8.dp))
-                // Renaming doesn't rewrite the transactions already filed under
-                // the old label, so say so rather than let it surprise them.
+                // Renaming doesn't change transactions already filed under the old name,
+                // so say so.
                 Text(
-                    "Transactions already sorted keep the name they were saved with.",
+                    "Existing transactions keep the old name.",
                     style = MaterialTheme.typography.labelSmall,
                     color = LedgerPalette.InkMuted,
                 )

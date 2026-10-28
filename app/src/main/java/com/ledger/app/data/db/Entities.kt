@@ -6,13 +6,13 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
- * Persisted transaction. Mirrors the domain [com.ledger.domain.model.Transaction]
- * but stores primitives Room understands. NOTE: there is no `rawBody` column —
- * the raw SMS is never written to disk, by design.
+ * A saved transaction. It mirrors the domain [com.ledger.domain.model.Transaction]
+ * using types Room can store. There is no column for the SMS text: the raw
+ * message is never written to disk.
  *
- * `dedupKey` is the stable idempotency key computed by DuplicateDetector
- * (reference-based, or composite fallback). Unique index => duplicate broadcasts
- * can never insert twice.
+ * `dedupKey` identifies the transaction, using its reference when there is one
+ * (see DuplicateDetector). It has a unique index, so the same message can never
+ * be saved twice.
  */
 @Entity(
     tableName = "transactions",
@@ -27,7 +27,7 @@ data class TransactionEntity(
     val dedupKey: String,
     val reference: String?,
     val institution: String,
-    val direction: String,           // "DEBIT" / "CREDIT"
+    val direction: String,  // "DEBIT" or "CREDIT"
     val amountMinor: Long,
     val balanceMinor: Long?,
     val feeMinor: Long?,
@@ -42,46 +42,51 @@ data class TransactionEntity(
     val needsReview: Boolean,
     /**
      * True when the counterparty is one of the user's own accounts (see
-     * [OwnAccountEntity]) — money moving between their own wallets, not spending.
-     * Such rows are excluded from the spend/received totals; only the provider
-     * [feeMinor] is counted, since that genuinely leaves the user's money.
+     * [OwnAccountEntity]), so this is money moving between their own wallets.
+     * These rows are left out of the totals, except for [feeMinor], which the user
+     * really did pay.
      */
     @ColumnInfo(defaultValue = "0")
     val selfTransfer: Boolean = false,
     /**
-     * Canonical [com.ledger.domain.model.AccountKey] form of [counterparty],
-     * stored so "is this one of my accounts?" is a plain SQL join rather than a
-     * Kotlin sweep over every row. Empty string = the counterparty carries no
-     * account number (a merchant name); null = not computed yet (pre-v3 rows,
-     * backfilled once on first use).
+     * [counterparty] as a normalised account number (see
+     * [com.ledger.domain.model.AccountKey]), so own-account matching can be done in
+     * SQL. An empty string means the counterparty has no number, such as a merchant
+     * name. Null means it hasn't been worked out yet; it is filled in on first use.
      */
     val counterpartyKey: String? = null,
     /**
-     * Canonical account keys found in the SMS narration, pipe-delimited and
-     * pipe-terminated (`"|244123456|"`) so a `LIKE '%|key|%'` test is exact.
+     * Normalised account numbers found in the SMS narration, written as
+     * `"|244123456|"` so a `LIKE '%|key|%'` test matches exactly.
      *
-     * Cross-network transfers put the counterparty's number in the reference
-     * rather than the sender field, so this is the only place that number
-     * survives — the narration text itself is a review hint, never a match key.
-     * Empty string = no number in the narration; null = not computed yet (pre-v4
-     * rows, backfilled once on first use).
+     * Cross-network transfers put the other party's number in the reference
+     * instead of the sender field, so this is where that number is kept. An empty
+     * string means there was no number. Null means it hasn't been worked out yet.
      */
     val referenceKeys: String? = null,
+    /** How this row relates to the cash ledger: a [CashMove] value, or null if not at all. */
+    val cashMove: String? = null,
+    /**
+     * True when this row's balance didn't follow from the one before it. For a live
+     * message, it is also set when the row before it had that problem (see the
+     * balance check in [com.ledger.app.data.repository.LedgerRepository]). While
+     * such a row waits in review, the next message isn't checked against it.
+     */
+    @ColumnInfo(defaultValue = "0")
+    val chainBreak: Boolean = false,
 )
 
 /**
- * One of the user's own wallets. Used to recognise "moving my own money" so an
- * internal transfer isn't counted as spending.
+ * One of the user's own wallets. Used to recognise "moving my own money" so a
+ * transfer between wallets isn't counted as spending.
  *
- * Identity is **(number, provider)**, not the number alone. One MSISDN routinely
- * carries more than one wallet — the same line commonly holds both an MTN MoMo
- * and a GhanaPay account — and each prints a different name, so they need
- * separate alias sets. Keying the table on the number alone meant adding the
- * second wallet silently overwrote the first, taking its names with it.
+ * A wallet is identified by number and provider together. One phone number
+ * often has more than one wallet, such as MTN MoMo and GhanaPay, and each
+ * prints a different name, so each needs its own row and its own names.
  *
- * `key` is the canonical [com.ledger.domain.model.AccountKey] form, so the same
- * number typed two different ways still collapses within one provider.
- * `identifier` keeps what the user actually typed, for display.
+ * `key` is the normalised number (see [com.ledger.domain.model.AccountKey]), so
+ * the same number typed two ways still matches. `identifier` keeps what the
+ * user typed, for display.
  */
 @Entity(
     tableName = "own_accounts",
@@ -94,21 +99,20 @@ data class OwnAccountEntity(
     val label: String,
     val addedAt: Long,
     /**
-     * Which provider this wallet lives with ([com.ledger.domain.model.Institution]
+     * The provider this wallet belongs to (an [com.ledger.domain.model.Institution]
      * name), or [ANY_PROVIDER] for "not sure".
      *
-     * Part of the unique index, hence non-null: SQLite treats NULLs as distinct,
-     * so a nullable column would let "not sure" be added over and over.
+     * It is part of the unique index, so it can't be null: SQLite treats every
+     * null as different, which would let "not sure" be added again and again.
      *
-     * It never narrows *matching* — a name registered against a GhanaPay wallet
-     * is exactly what appears inside an MTN alert, so scoping matches by provider
-     * would break the cross-wallet case this whole feature exists to catch. See
+     * It doesn't limit matching. A name saved against a GhanaPay wallet is exactly
+     * what appears in an MTN alert when money arrives from it. See
      * [com.ledger.domain.model.OwnAccountMatcher].
      */
     val institution: String = ANY_PROVIDER,
 ) {
     companion object {
-        /** "Not sure which wallet" — stored rather than null so it can be indexed. */
+        /** "Not sure which wallet". Stored instead of null so it can be indexed. */
         const val ANY_PROVIDER = ""
     }
 }
@@ -116,15 +120,14 @@ data class OwnAccountEntity(
 /**
  * A name a provider prints for one of the user's own accounts.
  *
- * MTN identifies a counterparty by name ("payment received from AMA OWUSU")
- * where GhanaPay gives a number. Without the name, an incoming transfer from the
- * user's own other wallet is indistinguishable from a stranger paying them, so
- * it counts as income and the matching debit counts as spending — the same money
- * booked twice.
+ * MTN names the other party ("payment received from AMA OWUSU") where GhanaPay
+ * gives a number. Without the name, money arriving from the user's other wallet
+ * looks like a stranger paying them. It would count as income, and the matching
+ * debit as spending.
  *
- * [name] is the normalised (trimmed, lower-cased, single-spaced) form and the
- * primary key, so the same name registered twice in different casing collapses.
- * [display] keeps what the user typed.
+ * [name] is the normalised form (trimmed, lower case, single spaces) and the
+ * primary key, so the same name in different casing is stored once. [display]
+ * keeps what the user typed.
  */
 @Entity(
     tableName = "own_account_names",
@@ -132,14 +135,16 @@ data class OwnAccountEntity(
 )
 data class OwnAccountNameEntity(
     @PrimaryKey val name: String,
-    /** The owning [OwnAccountEntity.id] — per wallet, not per number, because
-     *  two wallets on one number print different names. */
+    /**
+     * The [OwnAccountEntity.id] this name belongs to. Names belong to a wallet,
+     * not a number, because two wallets on one number print different names.
+     */
     val accountId: Long,
     val display: String,
 )
 
 /**
- * A categorization rule keyed on {counterparty, direction}. Mirrors
+ * A categorisation rule for a counterparty and direction. Mirrors
  * [com.ledger.domain.categorization.Rule].
  */
 @Entity(
@@ -152,37 +157,25 @@ data class RuleEntity(
     val direction: String,
     val category: String,
     val person: String?,
-    val matchType: String,           // "EXACT" / "CONTAINS"
+    val matchType: String,  // "EXACT" or "CONTAINS"
     val priority: Int,
     val enabled: Boolean,
     val lastMatchedAtMillis: Long?,
 )
 
 /**
- * An in-scope sender the user has onboarded (allow-list entry). Live capture is
- * only enabled per-sender after the "learn from a sample" onboarding step.
- */
-@Entity(tableName = "senders")
-data class SenderEntity(
-    @PrimaryKey val institution: String,   // Institution.name
-    val displayName: String,
-    val liveCaptureEnabled: Boolean,
-    val addedAt: Long,
-)
-
-/**
- * A user-managed category (the labels offered when reviewing a transaction or
- * writing a rule). Seeded with sensible defaults on first run, then fully
- * editable — add, rename, reorder, disable, or delete.
+ * A category the user can file transactions under. A default set is seeded on
+ * first run, and the user can add, rename, reorder, hide or delete them.
  *
- * `position` drives display order; `enabled = false` hides a category from the
- * pickers without deleting rules/transactions that already reference it.
- *
- * `kind` is a [CategoryKind] name and decides which direction offers it: money
- * out, money in, or both. The column default is declared explicitly so the schema
- * Room expects matches what [LedgerDatabase.MIGRATION_4_5]'s `ALTER TABLE ... ADD
- * COLUMN ... DEFAULT 'OUT'` actually produces — leaving it to the Kotlin
- * parameter default alone would describe the constructor, not the column.
+ * - `position` sets the display order.
+ * - `enabled = false` hides a category from the pickers without touching the
+ *   rules and transactions that use it.
+ * - `kind` is a [CategoryKind] name: money out, money in, or both. Its column
+ *   default is declared so the schema matches what [LedgerDatabase.MIGRATION_4_5]
+ *   creates.
+ * - `favorite` marks the categories the user uses most. Pickers show these
+ *   first; every other enabled category is behind "More". It is separate from
+ *   `enabled`, so choosing favourites never hides anything.
  */
 @Entity(
     tableName = "categories",
@@ -194,4 +187,23 @@ data class CategoryEntity(
     val position: Int,
     val enabled: Boolean = true,
     @ColumnInfo(defaultValue = "OUT") val kind: String = CategoryKind.OUT.name,
+    @ColumnInfo(defaultValue = "0") val favorite: Boolean = false,
+)
+
+/**
+ * A monthly spending limit for one category.
+ *
+ * It refers to the category by name, like transactions do, because names
+ * survive a backup and restore while row ids don't. The trade-off is that
+ * renaming a category leaves its budget under the old name, just as it does
+ * for transactions.
+ *
+ * Only spending categories have budgets.
+ */
+@Entity(tableName = "budgets")
+data class BudgetEntity(
+    @PrimaryKey val category: String,
+    /** The monthly limit in pesewas. Always above zero; removing a budget deletes the row. */
+    val limitMinor: Long,
+    val updatedAt: Long,
 )

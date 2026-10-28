@@ -1,57 +1,62 @@
 
 package com.ledger.domain.validation
 
+import com.ledger.domain.model.Money
 import com.ledger.domain.parser.PartialFields
 
 /**
- * The sole OTP-safety mechanism: strict POSITIVE template matching.
+ * Decides whether a message is a real transaction. This is the only thing that
+ * keeps OTPs out of the app.
  *
- * A message is only accepted as a transaction when it satisfies the strict
- * positive shape:
+ * A message is accepted only when it has all three of:
  *
- *   direction (DR/CR)  +  amount (currency-tagged)  +  balance
+ *   a direction (money in or out)  +  a currency amount  +  a balance
  *
- * The BALANCE is the true OTP discriminator: every real wallet/account
- * movement reports a post-transaction balance, and an OTP / verification code
- * / marketing blast never does. Requiring a balance is what makes an OTP
- * structurally fail this positive match — even the hard case of an OTP that
- * quotes an amount ("approval code for payment of GHS50.00 ... is 456123"),
- * because it carries no balance.
+ * The balance is what separates transactions from OTPs. Every real wallet
+ * movement reports the new balance, and OTPs, verification codes and marketing
+ * messages never do. That includes an OTP that quotes an amount ("approval
+ * code for payment of GHS50.00 ... is 456123").
  *
- * The provider transaction id (reference) is corroborating but OPTIONAL: real
- * captured samples show legitimate balance-bearing transactions with no
- * reference at all (e.g. interest credits, some bundle purchases). Those are
- * accepted and deduplicated via the composite fallback key rather than being
- * bounced to review. There is still NO OTP blocklist — the guarantee rests
- * entirely on the positive balance+amount+direction requirement.
+ * The transaction id is optional. Some real transactions have none (interest
+ * credits, some bundle purchases); they are accepted and deduplicated with a
+ * key built from their other fields. There is no OTP blocklist. The rule rests
+ * on requiring direction, amount and balance.
  *
- * Classification of a message that is not fully valid:
- *  - no currency amount at all                 -> NotTransaction (discard)
- *  - amount + balance but no clear direction    -> Incomplete (review: e.g. a
- *    "request received, awaiting confirmation" pending message)
- *  - amount + reference but no balance          -> Incomplete (review: format drift)
- *  - amount only (no balance, no reference)     -> NotTransaction (discard: OTP)
+ * A message that isn't fully valid is classified like this:
+ *  - no currency amount                       -> NotTransaction (dropped)
+ *  - amount and balance, no clear direction    -> Incomplete (review, e.g. a
+ *    "request received, awaiting confirmation" message)
+ *  - amount and reference, no balance          -> Incomplete (review: the format
+ *    may have changed)
+ *  - amount only                               -> NotTransaction (dropped: OTP)
  */
 class TransactionValidator {
 
     fun validate(fields: PartialFields, hasCurrencyAmount: Boolean): ValidationResult {
-        // Gate 1: no currency-tagged amount anywhere -> cannot be a transaction.
-        // This is what makes a bare OTP ("Your OTP is 123456") fail: 123456 is
-        // not preceded by a currency token.
+        // Check 1: no currency amount means it can't be a transaction. This is
+        // why a plain OTP ("Your OTP is 123456") fails: 123456 has no currency
+        // before it.
         if (!hasCurrencyAmount || fields.amount == null) {
             return ValidationResult.NotTransaction("no currency-tagged amount present")
+        }
+
+        // Check 1b: more than any wallet can hold or move (see Money.CEILING).
+        // Dropped rather than sent to review, because it can't be a real
+        // transaction and would break the totals.
+        if (!Money.withinCeiling(fields.amount) || !Money.withinCeiling(fields.balanceAfter)) {
+            return ValidationResult.NotTransaction("amount beyond any wallet limit")
         }
 
         val hasDirection = fields.direction != null
         val hasBalance = fields.balanceAfter != null
         val hasReference = !fields.reference.isNullOrBlank()
 
-        // Gate 2: strict positive match. Balance is the OTP discriminator.
+        // Check 2: the strict match. The balance is what rules out OTPs.
         if (hasDirection && hasBalance) {
             return ValidationResult.Valid
         }
 
-        // Transaction-like but ambiguous -> human review, never auto-persist.
+        // Looks like a transaction but something is unclear: send to review.
         if (hasBalance || hasReference) {
             val missing = buildList {
                 if (!hasDirection) add("direction")
@@ -60,7 +65,7 @@ class TransactionValidator {
             return ValidationResult.Incomplete("ambiguous transaction, missing: ${missing.joinToString(", ")}")
         }
 
-        // Amount but no balance and no reference: an OTP/marketing text. Discard.
-        return ValidationResult.NotTransaction("amount without balance — not transaction-shaped")
+        // An amount with no balance and no reference: an OTP or marketing text.
+        return ValidationResult.NotTransaction("amount without balance, not transaction-shaped")
     }
 }

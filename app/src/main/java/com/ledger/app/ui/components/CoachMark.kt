@@ -44,9 +44,9 @@ import androidx.compose.ui.unit.sp
 import com.ledger.app.tutorial.TutorialStep
 
 /**
- * Colours specific to the first-run guide. The coach-mark is deliberately the
- * one dark surface in an otherwise cream app — it reads as an overlay, not as
- * another card, which is why these sit here rather than in the shared palette.
+ * Colours for the setup guide. The guide's card is the only dark surface in
+ * the app, so it reads as an overlay rather than another card. That is why
+ * these live here and not in the shared palette.
  */
 private object Coach {
     val Card = Color(0xFF2A251D)
@@ -69,39 +69,39 @@ private object Coach {
     val DotOff = Color(0xFF5C5138)
     val Spotlight = Color(0xFFA9772A)
     val SpotlightHalo = Color(0x38A9772A)
-    /** Only ~12% — the anchored control has to stay bright and readable. */
+    /** Only about 12%, so the highlighted control stays bright and readable. */
     val Scrim = Color(0x1F1E160C)
 }
 
-/** Which face the coach-mark wears. */
+/** How the guide's card looks. */
 enum class CoachTone {
-    /** The ordinary beat. */
+    /** An ordinary step. */
     NORMAL,
-    /** A degraded-but-fine state (SMS access declined) — amber, never alarming. */
+    /** Something the user declined (such as SMS access). Amber, but not alarming. */
     WARNING,
-    /** The beat the user just satisfied. */
+    /** The step the user just finished. */
     DONE,
-    /** Re-entered from Settings → Replay setup guide. */
+    /** Reopened from Settings → Replay setup guide. */
     RESUMED,
 }
 
-/** Where the beak sits, and how far along that edge it points. */
+/** Which edge the card's pointer is on, and how far along it. */
 sealed interface CoachBeak {
     data object None : CoachBeak
-    /** Beak on the card's top edge, pointing up at a control above it. */
+    /** Pointer on the top edge, pointing up at a control above the card. */
     data class Top(val fraction: Float = 0.5f) : CoachBeak
-    /** Beak on the card's bottom edge, pointing down at a control below it. */
+    /** Pointer on the bottom edge, pointing down at a control below the card. */
     data class Bottom(val fraction: Float = 0.5f) : CoachBeak
 }
 
 /**
- * A single coach-mark: one dark card that anchors to a real control, leads with
- * the benefit, and always offers a way out.
+ * One step of the setup guide: a dark card that points at a real control,
+ * says why it is useful, and always offers a way out.
  *
- * It never covers the control it teaches — callers place it in the free space
- * and point the [beak] at the target. [onDismiss] is the ✕: it parks the whole
- * guide, which is a different thing from [secondaryLabel] ("Skip"), which only
- * advances past this beat.
+ * It never covers the control it is about. Callers place it in free space and
+ * aim the [beak] (the small pointer) at the control. [onDismiss] is the close
+ * button and pauses the whole guide. [secondaryLabel] ("Skip") only moves past
+ * this step.
  */
 @Composable
 fun CoachMark(
@@ -116,7 +116,7 @@ fun CoachMark(
     onSecondary: (() -> Unit)? = null,
     tone: CoachTone = CoachTone.NORMAL,
     beak: CoachBeak = CoachBeak.None,
-    /** 1-based position; omit (0) to hide the progress dots. */
+    /** 1-based position. Leave at 0 to hide the progress dots. */
     step: Int = 0,
     totalSteps: Int = TutorialStep.COUNTED,
 ) {
@@ -133,7 +133,7 @@ fun CoachMark(
                 .background(cardColor)
                 .padding(horizontal = 14.dp, vertical = 13.dp),
         ) {
-            // Header: where you are, and the way out.
+            // Header: the step label and the close button.
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 ToneLabel(label, tone, Modifier.weight(1f))
                 Icon(
@@ -218,7 +218,7 @@ fun CoachMark(
     }
 }
 
-/** The little rotated square that ties the card to its control. */
+/** The small rotated square that points from the card to its control. */
 @Composable
 private fun Beak(color: Color, fraction: Float, pointingUp: Boolean) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -230,7 +230,7 @@ private fun Beak(color: Color, fraction: Float, pointingUp: Boolean) {
                 .rotate(45f)
                 .background(color),
         )
-        // Reserve the half of the beak that pokes out beyond the card edge.
+        // Leave room for the half of the pointer that sticks out past the card.
         Spacer(Modifier.height(7.dp))
     }
 }
@@ -268,8 +268,9 @@ private fun ToneLabel(text: String, tone: CoachTone, modifier: Modifier = Modifi
 }
 
 /**
- * The gold halo that lifts the anchored control clear of the scrim. Applied to
- * the *real* control, so what the user is told to tap is what they tap.
+ * The gold outline that makes the highlighted control stand out above the
+ * scrim. It goes on the real control, so the user taps exactly what the guide
+ * describes.
  */
 fun Modifier.spotlight(active: Boolean, shape: RoundedCornerShape = RoundedCornerShape(12.dp)): Modifier =
     if (!active) this
@@ -278,9 +279,8 @@ fun Modifier.spotlight(active: Boolean, shape: RoundedCornerShape = RoundedCorne
         .border(3.dp, Coach.Spotlight, shape)
 
 /**
- * The faint wash over everything that isn't the anchored control. Only ~12%, and
- * deliberately **not** clickable — the guide must never block the action it is
- * describing.
+ * The faint shade over everything except the highlighted control. It is only
+ * about 12% and doesn't take taps, so the guide never blocks what it describes.
  */
 @Composable
 fun CoachScrim(visible: Boolean, modifier: Modifier = Modifier) {
@@ -290,8 +290,8 @@ fun CoachScrim(visible: Boolean, modifier: Modifier = Modifier) {
 }
 
 /**
- * Standard entrance for a coach-mark: fades and rises into place, so it reads as
- * arriving over the screen rather than being part of it.
+ * How a guide card appears: it fades in and rises into place, so it reads as
+ * sitting over the screen.
  */
 @Composable
 fun CoachMarkHost(visible: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
@@ -303,7 +303,7 @@ fun CoachMarkHost(visible: Boolean, modifier: Modifier = Modifier, content: @Com
     ) { content() }
 }
 
-/** "STEP 4 OF 6", or the tone-specific header the design calls for. */
+/** "STEP 4 OF 8", or the header for the card's tone. */
 fun coachLabel(step: TutorialStep, tone: CoachTone): String = when {
     tone == CoachTone.DONE -> "DONE · STEP ${step.number}"
     !step.counted -> "OPTIONAL · YOU'RE DONE"

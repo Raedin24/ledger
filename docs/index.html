@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger · Download for Android</title>
+<meta name="description" content="Track your MoMo, GhanaPay and Telecel Cash spending. Offline, on your phone. Free download for Android.">
+<link rel="icon" href="icon.png">
+<!-- Self-contained on purpose: no fonts, scripts or images from other sites.
+     The app has no internet access, so its download page doesn't call out either. -->
+<style>
+  :root {
+    --bg: #F7F2E7; --card: #FCF8EF; --sunken: #ECE5D3; --wave: #EFE7D6;
+    --ink: #2A251D; --soft: #6B6255; --muted: #9A8F7D; --line: rgba(42,37,29,.10);
+    --spend: #8F4A28; --gold: #A9772A; --green: #4F7A4D;
+    --pill: #2A251D; --pill-ink: #F7F2E7; --frame: #2A251D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1C1915; --card: #25211B; --sunken: #2E2922; --wave: #23201A;
+      --ink: #F1EADC; --soft: #C9BFAE; --muted: #9A8F7D; --line: rgba(241,234,220,.12);
+      --spend: #C9774F; --gold: #D2A24F; --green: #8DB487;
+      --pill: #F1EADC; --pill-ink: #1C1915; --frame: #0F0D0A;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); overflow-x: hidden;
+    font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  h1, h2 { font-family: "Newsreader", Georgia, "Times New Roman", serif; font-weight: 500; line-height: 1.08; margin: 0; }
+  h2 { font-size: 26px; margin: 44px 0 14px; }
+  p { margin: 0; }
+  a { color: var(--gold); }
+
+  /* ---- Hero: text and buttons on the left, the phone on the right ---- */
+  .hero-wrap { position: relative; padding: 28px 16px 8px; }
+  .waves { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
+  .waves path { fill: var(--wave); }
+  .hero {
+    position: relative; z-index: 1; max-width: 1040px; margin: 0 auto;
+    background: var(--card); border: 1px solid var(--line); border-radius: 28px;
+    padding: 32px 22px; display: grid; gap: 32px; align-items: center;
+    box-shadow: 0 18px 48px rgba(42,37,29,.08);
+  }
+  @media (min-width: 860px) {
+    .hero { grid-template-columns: 1.15fr 1fr; padding: 56px 64px; gap: 48px; }
+  }
+
+  .brand { display: flex; align-items: center; gap: 12px; color: var(--soft); font-weight: 600; }
+  .brand img { width: 40px; height: 40px; border-radius: 11px; }
+  h1 { font-size: clamp(42px, 7vw, 68px); margin-top: 22px; }
+  h1 em { font-style: normal; color: var(--spend); }
+  .tagline { margin-top: 16px; color: var(--soft); font-size: 18px; max-width: 30em; }
+
+  .get { display: flex; flex-wrap: wrap; gap: 22px; align-items: center; margin-top: 30px; }
+  .buttons { display: flex; flex-direction: column; gap: 14px; flex: 1 1 240px; max-width: 320px; }
+  .pill {
+    display: flex; align-items: center; gap: 14px; padding: 12px 26px 12px 20px; min-height: 64px;
+    background: var(--pill); color: var(--pill-ink); text-decoration: none; border-radius: 999px;
+    box-shadow: 0 8px 20px rgba(42,37,29,.18);
+  }
+  .pill:active { transform: translateY(1px); }
+  .pill svg { width: 30px; height: 30px; flex: none; }
+  .pill small { display: block; font-size: 12px; opacity: .75; line-height: 1.2; }
+  .pill span { display: block; font-size: 20px; font-weight: 700; line-height: 1.2; }
+  .pill.download { background: var(--spend); color: #fff; box-shadow: 0 8px 20px rgba(143,74,40,.30); }
+
+  /* The QR code only helps on a computer, so it is hidden on phones. */
+  .qr { display: none; flex-direction: column; align-items: center; gap: 8px; }
+  .qr .tag {
+    position: relative; background: var(--pill); color: var(--pill-ink); font-weight: 700;
+    padding: 6px 14px; border-radius: 10px; font-size: 15px;
+  }
+  .qr .tag::after {
+    content: ""; position: absolute; left: 50%; bottom: -6px; width: 12px; height: 12px;
+    background: var(--pill); transform: translateX(-50%) rotate(45deg); border-radius: 2px;
+  }
+  .qr img { width: 128px; height: 128px; margin-top: 4px; background: #fff; padding: 6px; border-radius: 10px; }
+  @media (min-width: 720px) and (hover: hover) { .qr { display: flex; } }
+
+  .facts { margin-top: 22px; color: var(--muted); font-size: 15px; }
+
+  /* ---- Phone with a screenshot of the app ---- */
+  .phone-col { display: flex; justify-content: center; }
+  .phone {
+    position: relative; width: min(280px, 72vw); aspect-ratio: 9 / 19.5;
+    background: var(--frame); border-radius: 44px; padding: 11px;
+    box-shadow: 0 30px 60px rgba(42,37,29,.22), inset 0 0 0 2px rgba(255,255,255,.06);
+  }
+  .phone::before { /* side button */
+    content: ""; position: absolute; right: -3px; top: 22%; width: 3px; height: 64px;
+    background: var(--frame); border-radius: 0 3px 3px 0;
+  }
+  .screen { width: 100%; height: 100%; border-radius: 34px; overflow: hidden; background: var(--bg); position: relative; }
+  .screen img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
+  .screen::after { /* camera */
+    content: ""; position: absolute; top: 10px; left: 50%; width: 12px; height: 12px;
+    transform: translateX(-50%); border-radius: 50%; background: var(--frame);
+  }
+
+
+  /* ---- Below the hero ---- */
+  main { max-width: 600px; margin: 0 auto; padding: 8px 16px 48px; }
+
+  ol.steps { list-style: none; padding: 0; margin: 0; counter-reset: step; }
+  ol.steps li {
+    counter-increment: step; position: relative;
+    background: var(--card); border: 1px solid var(--line); border-radius: 18px;
+    padding: 18px 18px 18px 64px; margin-bottom: 12px;
+  }
+  ol.steps li::before {
+    content: counter(step); position: absolute; left: 18px; top: 18px;
+    width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+    background: var(--sunken); color: var(--gold); font-weight: 700;
+  }
+  ol.steps strong { display: block; font-size: 18px; margin-bottom: 4px; }
+  ol.steps p { color: var(--soft); }
+  .path { display: inline; font-weight: 600; color: var(--ink); }
+  .note { margin-top: 8px; font-size: 15px; color: var(--muted); }
+
+  .box { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; }
+  .box p + p { margin-top: 10px; }
+  .warn { color: var(--spend); font-weight: 600; }
+
+  footer { margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  footer p + p { margin-top: 10px; }
+  footer .site { font-size: 17px; color: var(--soft); text-align: center; margin-bottom: 18px; }
+  code { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; word-break: break-all; color: var(--soft); }
+</style>
+</head>
+<body>
+
+<div class="hero-wrap">
+  <svg class="waves" viewBox="0 0 1440 900" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 170 C 320 60, 560 300, 900 210 S 1300 90, 1440 140 L1440 430 C 1180 360, 980 520, 700 470 S 220 360, 0 440 Z"/>
+    <path d="M0 700 C 260 620, 520 780, 820 720 S 1260 600, 1440 660 L1440 900 L0 900 Z"/>
+  </svg>
+
+  <section class="hero">
+    <div>
+      <div class="brand"><img src="icon.png" alt=""> Ledger</div>
+      <h1>Your money, <em>kept on this phone.</em></h1>
+      <p class="tagline">Ledger reads your MoMo, GhanaPay and Telecel Cash alerts and sorts your spending. It all stays on your phone.</p>
+
+      <div class="get">
+        <div class="qr">
+          <div class="tag">Scan me</div>
+          <img src="qr.svg" alt="QR code that opens this page on your phone">
+        </div>
+        <div class="buttons">
+          <a class="pill download" href="https://github.com/Raedin24/ledger/releases/latest/download/ledger.apk">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
+            <div><small>Download for</small><span>Android</span></div>
+          </a>
+          <a class="pill" href="https://github.com/Raedin24/ledger">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/></svg>
+            <div><small>See the code on</small><span>GitHub</span></div>
+          </a>
+        </div>
+      </div>
+
+      <p class="facts">Free · Android 8.0 or newer · No account · No internet access</p>
+    </div>
+
+    <div class="phone-col">
+      <div class="phone">
+        <div class="screen"><img src="preview.webp" alt="Ledger's dashboard: money in and out this month, cash on hand, daily spending and top categories"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<main>
+  <h2>How to install</h2>
+  <ol class="steps">
+    <li>
+      <strong>Download</strong>
+      <p>Tap <span class="path">Download for Android</span> above. If your browser warns about the file, tap <span class="path">Download anyway</span>.</p>
+    </li>
+    <li>
+      <strong>Open the file</strong>
+      <p>Tap the download notification, or open <span class="path">Files · Downloads · ledger.apk</span>.</p>
+      <p class="note">If asked, tap <span class="path">Settings</span>, turn on <span class="path">Allow from this source</span>, then go back.</p>
+    </li>
+    <li>
+      <strong>If Play Protect blocks it</strong>
+      <p>Open <span class="path">Play Store</span>, tap your profile picture, then <span class="path">Play Protect · ⚙ Settings</span> and turn off <span class="path">Scan apps with Play Protect</span>. Install Ledger, then turn it back on.</p>
+      <p class="note">Google blocks every app from outside the Play Store that reads SMS. Ledger reads your money alerts, so it's caught by that rule.</p>
+    </li>
+    <li>
+      <strong>Open Ledger and allow SMS access</strong>
+      <p>It reads your transaction alerts on the phone. Nothing is uploaded.</p>
+      <p class="note">To fill in your history, go to <span class="path">Settings · Export &amp; backup · Import past transactions</span>.</p>
+    </li>
+  </ol>
+
+  <h2>Updating</h2>
+  <div class="box">
+    <p>Download again and install over the old version. Your data stays.</p>
+    <p class="warn">Don't uninstall to update. Uninstalling erases your data, and it can't be recovered.</p>
+  </div>
+
+  <footer>
+    <p class="site">raedin24.github.io/ledger</p>
+    <p><a href="https://github.com/Raedin24/ledger">Source code</a> · <a href="https://github.com/Raedin24/ledger/releases">All releases and what's new</a></p>
+    <p>Every release is signed with the same certificate. SHA-256:<br><code>709a6cb7ef850e7b79c874e9878c150b1c327583ba41c6a16d4ab5c8f8e2265c</code></p>
+  </footer>
+</main>
+</body>
+</html>

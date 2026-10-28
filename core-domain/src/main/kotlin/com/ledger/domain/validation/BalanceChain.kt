@@ -4,32 +4,29 @@ import com.ledger.domain.model.Direction
 import com.ledger.domain.model.Money
 
 /**
- * Arithmetic tying one transaction to the balance the same provider last
- * reported.
+ * Checks that a transaction's balance follows from the last balance the same
+ * provider reported.
  *
- * Sender IDs are unauthenticated alphanumeric strings and Android exposes no way
- * to verify them, so a message parsing cleanly is not evidence it came from the
- * provider. The running balance is harder to forge: to inject a transaction that
- * does not contradict the chain, a sender has to already know the victim's
+ * Android has no way to verify an SMS sender name, so a message that parses
+ * cleanly isn't proof it came from the provider. The running balance is
+ * harder to fake, because a fake message would have to know the user's
  * current balance.
  *
- * Kept here, framework-free, because it is the kind of rule worth testing
- * exhaustively without a database in the way.
+ * This lives in core-domain, free of Android, so it can be tested thoroughly
+ * without a database.
  */
 object BalanceChain {
 
     /**
-     * Whether [balanceAfter] is what [previousBalance] becomes once this
-     * transaction is applied.
+     * Whether [balanceAfter] is what [previousBalance] becomes after this
+     * transaction.
      *
-     * A debit is expected to remove the amount *and* the fee: providers report
-     * the balance after both. A credit adds the amount, fees on inbound money
-     * having already been taken by the sender.
+     * A debit removes the amount and the fee, because providers report the
+     * balance after both. A credit adds the amount.
      *
-     * False does not mean fraud. A missed message — phone off, deleted SMS, an
-     * inbox import with gaps — leaves exactly the same footprint, and a single
-     * message carries nothing that tells the two apart. Callers are expected to
-     * route a break to review rather than reject it.
+     * False doesn't mean fraud. A missed message (phone off, deleted SMS, gaps in
+     * an inbox import) looks exactly the same. Callers should send a break to
+     * review, not reject it.
      */
     fun follows(
         previousBalance: Money,

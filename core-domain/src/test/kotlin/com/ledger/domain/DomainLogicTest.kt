@@ -11,6 +11,7 @@ import com.ledger.domain.model.Transaction
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
@@ -43,26 +44,21 @@ class DomainLogicTest {
 
     // ---------- Duplicate detection ----------
 
-    @Test fun `duplicate reference is detected`() {
+    @Test fun `duplicate reference yields one key`() {
         val d = DuplicateDetector()
-        val a = txn(ref = "TXN999")
-        val b = txn(ref = "txn999") // case-insensitive same reference
-        assertTrue(d.isDuplicate(b, setOf(d.keyFor(a))))
+        // Case-insensitive: the same reference in either casing is one event.
+        assertEquals(d.keyFor(txn(ref = "TXN999")), d.keyFor(txn(ref = "txn999")))
     }
 
     @Test fun `missing reference falls back to composite key`() {
         val d = DuplicateDetector()
-        val a = txn(ref = null)
-        val b = txn(ref = null) // same institution/dir/amount/balance/time bucket
-        val deduped = d.deduplicate(listOf(a, b))
-        assertEquals(1, deduped.size)
+        // Same institution/direction/amount/balance/time bucket.
+        assertEquals(d.keyFor(txn(ref = null)), d.keyFor(txn(ref = null)))
     }
 
     @Test fun `different references are not duplicates`() {
         val d = DuplicateDetector()
-        val a = txn(ref = "A")
-        val b = txn(ref = "B")
-        assertFalse(d.isDuplicate(b, setOf(d.keyFor(a))))
+        assertNotEquals(d.keyFor(txn(ref = "A")), d.keyFor(txn(ref = "B")))
     }
 
     // ---------- Categorization ----------
@@ -83,7 +79,7 @@ class DomainLogicTest {
     }
 
     @Test fun `substring false-positive is avoided`() {
-        // A bare "MOM" rule must not match "MOMOUSER" (the known gotcha).
+        // A bare "MOM" rule must not match "MOMOUSER".
         val rule = Rule(1, "MOM", Direction.DEBIT, "Family", "Mom", matchType = Rule.MatchType.CONTAINS)
         assertFalse(rule.matches("MOMOUSER", Direction.DEBIT))
         assertTrue(rule.matches("PAYMENT TO MOM", Direction.DEBIT))

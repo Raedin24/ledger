@@ -15,16 +15,16 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * One-time backfill of past transactions from the device SMS inbox.
+ * Imports past transactions from the SMS inbox.
  *
- * Reads `content://sms/inbox`, keeps ONLY messages whose sender maps to a known
- * [Institution] (everything else is skipped before its body is ever touched by
- * the pipeline), and runs each through the same [LedgerRepository.ingest] path
- * as live capture. Because ingest is dedup-keyed, this is idempotent — safe to
- * run more than once, and safe to run alongside live capture. Raw bodies are
- * never stored; the inbox's original timestamp becomes the transaction date.
+ * It reads `content://sms/inbox` and keeps only messages from a supported
+ * provider ([Institution]); everything else is skipped before its text is
+ * read. Each message goes through [LedgerRepository.ingest], the same path as
+ * live capture. Saving is dedup-keyed, so the import is safe to run more than
+ * once and alongside live capture. Message text is never stored, and the
+ * inbox's timestamp becomes the transaction date.
  *
- * Requires READ_SMS (see [com.ledger.app.security.CapturePermission]).
+ * Needs READ_SMS (see [com.ledger.app.security.CapturePermission]).
  */
 @Singleton
 class SmsInboxImporter @Inject constructor(
@@ -51,24 +51,41 @@ class SmsInboxImporter @Inject constructor(
             val bodyIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
             val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
 
+            val batch = ArrayList<IncomingSms>(BATCH)
+            suspend fun flush() {
+                if (batch.isEmpty()) return
+                repository.ingestBatch(batch).forEach { outcome ->
+                    when (outcome) {
+                        is LedgerRepository.Ingested.Saved, is LedgerRepository.Ingested.Review -> imported++
+                        is LedgerRepository.Ingested.Duplicate -> duplicates++
+                        is LedgerRepository.Ingested.Ignored -> ignored++
+                    }
+                }
+                batch.clear()
+            }
             while (cursor.moveToNext()) {
-                // Cooperative cancellation — lets the user Quit a long backfill.
+                // Lets the user cancel a long import.
                 coroutineContext.ensureActive()
                 val address = cursor.getString(addressIdx) ?: continue
-                // Skip non-trusted senders before their body is read into the pipeline.
+                // Skip unsupported senders before reading their text.
                 if (Institution.fromSenderId(address) == null) continue
                 val body = cursor.getString(bodyIdx) ?: continue
                 val date = cursor.getLong(dateIdx)
                 scanned++
 
-                val sms = IncomingSms(senderId = address, body = body, receivedAt = Instant.ofEpochMilli(date))
-                when (repository.ingest(sms)) {
-                    is LedgerRepository.Ingested.Saved, is LedgerRepository.Ingested.Review -> imported++
-                    is LedgerRepository.Ingested.Duplicate -> duplicates++
-                    is LedgerRepository.Ingested.Ignored -> ignored++
-                }
+                batch += IncomingSms(senderId = address, body = body, receivedAt = Instant.ofEpochMilli(date))
+                if (batch.size == BATCH) flush()
             }
+            flush()
         }
         Report(scanned = scanned, imported = imported, duplicates = duplicates, ignored = ignored)
+    }
+
+    private companion object {
+        /**
+         * Messages per transaction (see [LedgerRepository.ingestBatch]). Small enough
+         * that cancelling loses little, large enough to keep commits cheap.
+         */
+        const val BATCH = 200
     }
 }

@@ -9,10 +9,9 @@ import org.junit.jupiter.api.Test
 import java.time.Instant
 
 /**
- * The parser test corpus is a HARD exit criterion (roadmap): positive matches
- * for every sender/type in scope, plus deliberate near-misses — including
- * OTP-shaped strings from the same sender IDs as real transactions — confirming
- * they are correctly rejected.
+ * Parser tests: a positive match for every supported provider and message
+ * type, plus near-misses that must be rejected. The near-misses include
+ * OTP-like messages from the same sender names as real transactions.
  */
 class SmsParserTest {
 
@@ -32,7 +31,7 @@ class SmsParserTest {
         assertEquals(25000, t.amount.minor)
         assertEquals(134020, t.balanceAfter!!.minor)
         assertEquals(100, t.fee!!.minor)
-        // reference is the provider TRANSACTION ID, not the "Reference:" narration.
+        // The reference is the provider's transaction id, not the "Reference:" narration.
         assertEquals("5566778899", t.reference)
         assertTrue(t.counterparty!!.contains("MELCOM"))
     }
@@ -61,7 +60,7 @@ class SmsParserTest {
             "You have transferred GHS 20.00 to 0545000003 MTN MOBILE MONEY. Ref: uber. Transaction ID: 620008130548. Balance: GHS 13.58.")
             as ParseResult.Parsed).transaction
         assertEquals("uber", t.referenceHint)
-        assertEquals("620008130548", t.reference) // hint is NOT the dedup key
+        assertEquals("620008130548", t.reference)  // the narration is not the dedup key
     }
 
     @Test fun `GhanaPay credit parses`() {
@@ -76,7 +75,7 @@ class SmsParserTest {
         assertInstanceOf(ParseResult.Parsed::class.java, r)
     }
 
-    // ---------- OTP / non-transaction near-misses (MUST be discarded) ----------
+    // ---------- OTPs and other non-transactions (must be discarded) ----------
 
     @Test fun `plain OTP from MoMo sender is discarded`() {
         assertInstanceOf(ParseResult.Discarded::class.java,
@@ -105,10 +104,10 @@ class SmsParserTest {
             parse("MobileMoney", "Your current balance is GHS1,340.20. Thank you for using MTN MoMo."))
     }
 
-    // ---------- Reference optional / ambiguous -> review ----------
+    // ---------- Optional reference, unclear messages go to review ----------
 
     @Test fun `amount and balance without a reference still parses`() {
-        // Reference is corroborating, not required; balance is the OTP guard.
+        // The reference is optional; the balance is what rules out OTPs.
         assertInstanceOf(ParseResult.Parsed::class.java,
             parse("MobileMoney", "Payment made to NEWVENDOR for GHS30.00. Current Balance: GHS900.00."))
     }
@@ -118,10 +117,24 @@ class SmsParserTest {
             parse("MobileMoney", "You have received GHS80.00 from 0201112222. Transaction Id: 999888777."))
     }
 
-    @Test fun `pending request with balance but no direction goes to review`() {
+    @Test fun `bundle purchase is a debit to the provider despite pending wording`() {
+        // Worded as a request awaiting confirmation, but it reports a new
+        // balance, so the money has already left. There is no third party: the
+        // provider sold the bundle, so it is the counterparty.
+        val t = (parse("T-CASH",
+            "0000012345678901 confirmed. Your bundle purchase request of GHS4.00 on 2026-05-03 has been received at 09:12:44. Kindly wait for confirmation. Your new Telecel Cash balance is GHS9.87.")
+            as ParseResult.Parsed).transaction
+        assertEquals(Direction.DEBIT, t.direction)
+        assertEquals(400, t.amount.minor)
+        assertEquals("Telecel Cash", t.counterparty)
+    }
+
+    @Test fun `request with balance but no direction goes to review`() {
+        // Nothing says which way the money moved, so the parser must not guess.
+        // A wrong direction is worse than a review prompt.
         assertInstanceOf(ParseResult.NeedsAttention::class.java,
             parse("T-CASH",
-                "0000013497138849 confirmed. Your bundle purchase request of GHS3.00 on 2026-06-25 has been received. Your new Telecel Cash balance is GHS0.01."))
+                "0000012345678902 confirmed. Your request of GHS4.00 on 2026-05-03 has been processed. Your new Telecel Cash balance is GHS9.87."))
     }
 
     // ---------- Scoping ----------

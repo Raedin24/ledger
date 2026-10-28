@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.ledger.app.data.db.CashMove
 import com.ledger.app.data.db.TransactionEntity
 import com.ledger.app.ui.components.CategoryPill
 import com.ledger.app.ui.components.LedgerCard
@@ -33,12 +34,13 @@ import java.time.format.DateTimeFormatter
 private val dateFmt = DateTimeFormatter.ofPattern("d MMM").withZone(ZoneId.systemDefault())
 private val dateFmtWithYear = DateTimeFormatter.ofPattern("d MMM yyyy").withZone(ZoneId.systemDefault())
 
-/** Matches [com.ledger.app.ui.components.LedgerCard]'s silhouette, hoisted so the
- *  selection border doesn't allocate a shape per row. */
+/** Matches [com.ledger.app.ui.components.LedgerCard]'s shape, shared by every row's selection border. */
 private val CardShape = RoundedCornerShape(16.dp)
 
-/** Rows only carry the year when the transaction falls outside the current one —
- *  otherwise an imported 2023 alert would read as if it happened this month. */
+/**
+ * Rows only show the year when it isn't this year, so an old imported alert
+ * doesn't look recent.
+ */
 private fun rowDate(occurredAt: Long): String {
     val zone = ZoneId.systemDefault()
     val instant = Instant.ofEpochMilli(occurredAt)
@@ -56,10 +58,12 @@ fun TransactionRow(
 ) {
     val colors = LedgerThemeTokens.colors
     val isCredit = txn.direction == "CREDIT"
-    val title = txn.counterparty ?: txn.category ?: "Unknown"
-    // Both of these format a string and read the clock. Keyed to the row's own
-    // data so a recycled row recomputes but a scroll frame doesn't: this runs
-    // once per row instead of once per row per recomposition.
+    // A cash entry with no payee would otherwise show its category twice.
+    val title = txn.counterparty
+        ?: (if (txn.institution == "CASH") "Cash" else txn.category)
+        ?: "Unknown"
+    // Remembered against the row's data, so this runs once per row, not on
+    // every scroll frame.
     val date = remember(txn.occurredAt) { rowDate(txn.occurredAt) }
     val amount = remember(txn.amountMinor, isCredit) {
         (if (isCredit) "+" else "−") + formatCedis(txn.amountMinor)
@@ -88,8 +92,16 @@ fun TransactionRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (txn.selfTransfer) {
-                        // Says why this one isn't in the spend total.
+                    if (txn.cashMove == CashMove.OPENING) {
+                        // A recount, not income or spending.
+                        Text(
+                            "Adjustment · $date",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.inkMuted,
+                            maxLines = 1,
+                        )
+                    } else if (txn.selfTransfer) {
+                        // Shows why this row isn't in the spending total.
                         CategoryPill("Transfers")
                         Text(
                             "Between your accounts · $date",
@@ -102,8 +114,8 @@ fun TransactionRow(
                         CategoryPill(txn.category)
                         Text(date, style = MaterialTheme.typography.labelSmall, color = colors.inkMuted, maxLines = 1)
                     } else {
-                        // Falls back to the wallet's friendly name, not the stored
-                        // enum — an uncategorised row read "MTN_MOMO".
+                        // With no category, show the wallet's readable name rather than the
+                        // stored enum name.
                         Text(
                             "${txn.referenceHint ?: institutionLabel(txn.institution)} · $date",
                             style = MaterialTheme.typography.labelSmall,

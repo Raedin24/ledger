@@ -22,34 +22,30 @@ import androidx.compose.ui.zIndex
 import kotlinx.coroutines.isActive
 
 /**
- * Drag-to-reorder for a `LazyColumn`, hand-rolled.
+ * Drag-to-reorder for a `LazyColumn`.
  *
- * There is no reorderable list in Compose Foundation, and the third-party ones
- * are a dependency for something this app needs in exactly one screen — so this
- * is the small version: no animation queue, no nested-scroll plumbing, just the
- * two things a reorder actually needs.
+ * Compose Foundation has no reorderable list, and only one screen needs it, so
+ * this is a small version written here instead of adding a library.
  *
- * It works on item **keys**, not indices, because the lists that use it are
- * sectioned: the section headers are items too, so a lazy index is not a position
- * in any one model. [ReorderState.canDrop] is what keeps a row inside its own
- * section — a header's key simply fails the test, as does a row from another
- * section, and the drag slides past both.
+ * It works with item keys, not indices. The lists that use it have section
+ * headers, which are items too, so an index isn't a position in the data.
+ * [ReorderState.canDrop] keeps a row inside its own section: a header's key,
+ * or a row from another section, fails the check and the drag passes over it.
  *
- * The dragged row is pinned to the **screen**, not to the content: it is drawn at
- * the point the finger has taken it to, and the list scrolls and re-slots
- * underneath. That is why the translation is computed as `drawn − laid out`
- * rather than accumulated: when a swap moves the row to a new slot mid-drag, the
- * jump the layout just made falls straight out of the subtraction. Accumulating
- * an offset and correcting it after each swap drifts by a pixel or two per swap,
- * and after a long drag the row is visibly no longer under the finger.
+ * The dragged row stays under the finger while the list moves beneath it. Its
+ * offset is worked out as "where it should be drawn minus where the list put
+ * it", rather than added up step by step. That way, when a swap moves the row
+ * to a new slot mid-drag, it doesn't slowly drift away from the finger.
  */
 @Stable
 class ReorderState internal constructor(
     private val listState: LazyListState,
     private val haptics: HapticFeedback,
 ) {
-    /** Set by [rememberReorderState] on each composition — read only from gesture
-     *  callbacks, never during composition, so plain fields are enough. */
+    /**
+     * Set by [rememberReorderState] on each composition. Only read from gesture
+     * callbacks, never during composition, so a plain field is enough.
+     */
     internal var onMove: (from: Any, to: Any) -> Unit = { _, _ -> }
     internal var canDrop: (from: Any, to: Any) -> Boolean = { _, _ -> false }
 
@@ -60,8 +56,10 @@ class ReorderState internal constructor(
     /** Finger travel since the drag began, in pixels. */
     private var travel by mutableFloatStateOf(0f)
 
-    /** Where the list had laid the row out when the drag began, in viewport
-     *  coordinates — the anchor [drawnTop] is measured from. */
+    /**
+     * Where the list placed the row when the drag began, in viewport coordinates.
+     * [drawnTop] is measured from here.
+     */
     private var anchor = 0
 
     private fun itemFor(key: Any) =
@@ -70,13 +68,10 @@ class ReorderState internal constructor(
     /** Where the dragged row is drawn, in viewport coordinates. */
     private val drawnTop: Float get() = anchor + travel
 
-    /**
-     * Vertical translation for the row keyed [key] — zero for every row except
-     * the one being dragged.
-     */
+    /** Vertical offset for the row keyed [key]. Zero for every row except the dragged one. */
     fun translationFor(key: Any): Float {
         if (key != draggingKey) return 0f
-        // Not yet laid out (scrolled off during a fast drag): fall back to raw
+        // Not laid out yet (scrolled away during a fast drag): use the raw finger
         // travel rather than snapping the row back to its slot.
         val item = itemFor(key) ?: return travel
         return drawnTop - item.offset
@@ -93,9 +88,8 @@ class ReorderState internal constructor(
         val key = draggingKey ?: return
         travel += delta
         val dragged = itemFor(key) ?: return
-        // Swap when the row's *middle* crosses into a neighbour, not its edge:
-        // testing the edge fires as soon as the rows overlap by a pixel, which
-        // makes a slow drag flutter between two orders.
+        // Swap when the dragged row's middle crosses into a neighbour, not its
+        // edge. Using the edge makes a slow drag flicker between two orders.
         val centre = drawnTop + dragged.size / 2f
         val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { other ->
             other.key != key &&
@@ -115,9 +109,8 @@ class ReorderState internal constructor(
     }
 
     /**
-     * Pixels to scroll this frame so a row held against the top or bottom edge
-     * keeps travelling — without it a list taller than the screen can only be
-     * reordered as far as one screenful.
+     * How far to scroll this frame when the row is held near the top or bottom
+     * edge, so a list longer than the screen can be reordered all the way.
      */
     internal fun autoScrollDelta(): Float {
         val key = draggingKey ?: return 0f
@@ -132,13 +125,12 @@ class ReorderState internal constructor(
             bottom > info.viewportEndOffset - hot -> bottom - (info.viewportEndOffset - hot)
             else -> return 0f
         }
-        // Ramps with how far into the edge zone the row has been pushed, so a
-        // nudge creeps and a shove runs.
+        // The further into the edge zone, the faster it scrolls.
         return (past / hot).coerceIn(-1f, 1f) * MAX_SCROLL_PER_FRAME
     }
 }
 
-/** How much of the viewport, at each end, counts as the auto-scroll edge zone. */
+/** How much of the viewport at each end counts as the auto-scroll zone. */
 private const val EDGE_FRACTION = 0.15f
 private const val MAX_EDGE_PX = 140f
 private const val MAX_SCROLL_PER_FRAME = 14f
@@ -172,23 +164,25 @@ fun rememberReorderState(
     return state
 }
 
-/** Draws the row keyed [key] under the finger while it is being dragged, and
- *  lifts it above the rows it is passing over. */
+/**
+ * Draws the row keyed [key] under the finger while it is dragged, above the
+ * rows it passes over.
+ */
 fun Modifier.reorderableItem(state: ReorderState, key: Any): Modifier =
     this
         .zIndex(if (state.draggingKey == key) 1f else 0f)
         .graphicsLayer { translationY = state.translationFor(key) }
 
 /**
- * Turns a control into the drag handle for the row keyed [key].
+ * Makes a control the drag handle for the row keyed [key].
  *
- * The gesture lives on the handle rather than the whole row for two reasons: the
- * row keeps its own tap (open the editor), and a child pointer handler consumes
- * the drag before the enclosing `LazyColumn`'s scroll sees it, so a vertical drag
- * from the handle reorders instead of scrolling.
+ * The gesture is on the handle, not the whole row, for two reasons. The row
+ * keeps its own tap (opening the editor). And the handle takes the drag before
+ * the `LazyColumn` sees it, so dragging the handle reorders instead of
+ * scrolling.
  *
- * [onDrop] is called once, when the finger lifts — that is where the new order is
- * persisted, so a drag across ten rows is one write rather than ten.
+ * [onDrop] is called once, when the finger lifts. That is where the new order
+ * is saved, so a long drag is one write.
  */
 fun Modifier.dragHandle(state: ReorderState, key: Any, onDrop: () -> Unit): Modifier =
     this.pointerInput(key) {

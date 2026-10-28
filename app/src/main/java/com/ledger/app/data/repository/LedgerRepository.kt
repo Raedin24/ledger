@@ -4,18 +4,25 @@ import com.ledger.app.data.backup.BackupFile
 import com.ledger.app.data.backup.LedgerTransfer
 import com.ledger.app.data.backup.toEntity
 import com.ledger.app.data.backup.toNameEntities
+import com.ledger.app.data.budget.BudgetStatus
+import com.ledger.app.data.db.BalanceAnchor
+import com.ledger.app.data.db.BudgetDao
+import com.ledger.app.data.db.BudgetEntity
+import com.ledger.app.data.db.CashMove
+import com.ledger.app.data.db.CashMove.answeredNo
 import com.ledger.app.data.db.CategoryDao
 import com.ledger.app.data.db.CategoryEntity
 import com.ledger.app.data.db.CategoryKind
 import com.ledger.app.data.db.CategoryOptions
 import com.ledger.app.data.db.DefaultCategories
+import com.ledger.app.data.db.LedgerDatabase
+import androidx.room.withTransaction
 import com.ledger.app.data.db.OwnAccountDao
 import com.ledger.app.data.db.OwnAccountEntity
 import com.ledger.app.data.db.OwnAccountNameDao
 import com.ledger.app.data.db.OwnAccountNameEntity
 import com.ledger.app.data.db.RuleDao
 import com.ledger.app.data.db.RuleEntity
-import com.ledger.app.data.db.SenderDao
 import com.ledger.app.data.db.TransactionDao
 import com.ledger.app.data.db.TransactionEntity
 import com.ledger.app.data.mapper.asString
@@ -23,6 +30,7 @@ import com.ledger.app.data.mapper.packReferenceKeys
 import com.ledger.app.data.mapper.toDomain
 import com.ledger.app.data.mapper.toEntity
 import com.ledger.domain.categorization.CategorizationEngine
+import com.ledger.domain.categorization.Rule
 import com.ledger.domain.dedup.DuplicateDetector
 import com.ledger.domain.model.AccountKey
 import com.ledger.domain.model.Direction
@@ -34,15 +42,16 @@ import com.ledger.domain.validation.BalanceChain
 import com.ledger.domain.parser.IncomingSms
 import com.ledger.domain.parser.ParseResult
 import com.ledger.domain.parser.SmsParser
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * The single seam between the framework-free domain pipeline and Android storage.
- * The BroadcastReceiver hands raw SMS here; everything downstream (parse,
- * validate, dedup, categorize, persist) happens in this one auditable place.
+ * Connects the domain pipeline to storage. Every captured SMS is parsed,
+ * validated, deduplicated, categorised and saved here.
  */
 @Singleton
 class LedgerRepository @Inject constructor(
@@ -51,11 +60,28 @@ class LedgerRepository @Inject constructor(
     private val categorizer: CategorizationEngine,
     private val transactionDao: TransactionDao,
     private val ruleDao: RuleDao,
-    private val senderDao: SenderDao,
     private val categoryDao: CategoryDao,
     private val ownAccountDao: OwnAccountDao,
     private val ownAccountNameDao: OwnAccountNameDao,
+    private val budgetDao: BudgetDao,
+    private val database: LedgerDatabase,
 ) {
+
+    /**
+     * Every captured message is checked against the user's rules and their own
+     * accounts. Both lists are cached here so an inbox import doesn't re-read
+     * them for each message.
+     *
+     * A cache is cleared by the methods that change its data. Volatile is
+     * enough: if two threads race, the worst case is loading the list twice.
+     */
+    @Volatile private var ruleCache: List<Rule>? = null
+
+    @Volatile private var matcherCache: OwnAccountMatcher? = null
+
+    private fun invalidateRules() { ruleCache = null }
+
+    private fun invalidateOwnAccounts() { matcherCache = null }
 
     sealed interface Ingested {
         data object Saved : Ingested
@@ -65,13 +91,15 @@ class LedgerRepository @Inject constructor(
     }
 
     /**
-     * Full capture path for one inbound SMS. The [sms] body is used transiently
-     * and never persisted. Returns the outcome for optional user notification.
+     * Captures one SMS. The body is used here and never stored.
+     *
+     * @param live true for a message that just arrived, false for the inbox import.
+     *   Only live messages are held back by an unconfirmed balance break.
      */
-    suspend fun ingest(sms: IncomingSms): Ingested {
-        return when (val result = parser.parse(sms, enabledInstitutions())) {
+    suspend fun ingest(sms: IncomingSms, live: Boolean = true): Ingested {
+        return when (val result = parser.parse(sms)) {
             is ParseResult.Ignored -> Ingested.Ignored
-            is ParseResult.Discarded -> Ingested.Ignored   // OTP / marketing — nothing stored
+            is ParseResult.Discarded -> Ingested.Ignored  // OTP or marketing, nothing stored
             is ParseResult.NeedsAttention -> {
                 val partial = result.partial
                 val txn = Transaction(
@@ -88,23 +116,49 @@ class LedgerRepository @Inject constructor(
                     capturedAt = result.receivedAt,
                     needsReview = true,
                 )
-                if (persist(txn)) Ingested.Review else Ingested.Duplicate
+                if (persist(txn, live)) Ingested.Review else Ingested.Duplicate
             }
             is ParseResult.Parsed -> {
                 val categorized = applyRules(result.transaction)
-                if (persist(categorized)) {
+                if (persist(categorized, live)) {
                     if (categorized.needsReview) Ingested.Review else Ingested.Saved
-                } else Ingested.Duplicate
+                } else {
+                    // Already stored, but the message is a cash-out: ask about it.
+                    if (categorized.cashMovement) {
+                        transactionDao.offerCash(duplicateDetector.keyFor(categorized).asString())
+                    }
+                    Ingested.Duplicate
+                }
             }
         }
     }
 
+    /**
+     * [ingest] for many messages in one transaction. A cancelled batch rolls back
+     * whole; running the import again picks up where it stopped.
+     */
+    suspend fun ingestBatch(messages: List<IncomingSms>): List<Ingested> =
+        try {
+            database.withTransaction { messages.map { ingest(it, live = false) } }
+        } catch (t: Throwable) {
+            // applyRules updated rule timestamps in the cache as it went. The
+            // rollback undid those writes, so reload the cache next time.
+            invalidateRules()
+            throw t
+        }
+
     /** Runs the categorization engine and touches the matched rule's timestamp. */
     private suspend fun applyRules(txn: Transaction): Transaction {
-        val rules = ruleDao.all().map { it.toDomain() }
-        return when (val out = categorizer.categorize(txn, rules, System.currentTimeMillis())) {
+        val rules = ruleCache ?: ruleDao.all().map { it.toDomain() }.also { ruleCache = it }
+        val now = System.currentTimeMillis()
+        return when (val out = categorizer.categorize(txn, rules, now)) {
             is CategorizationEngine.Outcome.Categorized -> {
-                ruleDao.touchLastMatched(out.ruleId, System.currentTimeMillis())
+                ruleDao.touchLastMatched(out.ruleId, now)
+                // Update the cached rule instead of clearing the cache, which
+                // would force a reload on almost every message of an import.
+                ruleCache = rules.map {
+                    if (it.id == out.ruleId) it.copy(lastMatchedAtMillis = now) else it
+                }
                 out.transaction
             }
             is CategorizationEngine.Outcome.Review -> out.transaction
@@ -112,52 +166,50 @@ class LedgerRepository @Inject constructor(
     }
 
     /**
-     * Inserts respecting the unique dedup key. Returns false if it was a duplicate.
-     *
-     * Transfers between the user's own accounts are flagged here, at the one
-     * place every capture funnels through, so the dashboard can leave them out
-     * of spending without the UI having to know the rule.
+     * Inserts unless the dedup key exists; returns false for a duplicate. Transfers
+     * between the user's own accounts are flagged here.
      */
-    private suspend fun persist(txn: Transaction): Boolean {
+    private suspend fun persist(txn: Transaction, live: Boolean): Boolean {
         val key = duplicateDetector.keyFor(txn).asString()
         val isSelf = ownAccountMatcher().isOwn(txn.counterparty, txn.referenceHint)
-        // A recognised self-transfer needs no decision from the user, so it is
-        // filed straight away instead of joining the review queue.
+        // A self-transfer is filed without review, and is never a cash movement:
+        // moving it to cash would count it twice.
         val settled = if (isSelf) {
-            txn.copy(category = txn.category ?: TRANSFERS_CATEGORY, needsReview = false)
+            txn.copy(category = txn.category ?: TRANSFERS_CATEGORY, needsReview = false, cashMovement = false)
         } else txn
-        // A break in the balance chain outranks the self-transfer shortcut: the
-        // whole point is that a transaction claiming to be routine gets looked at.
-        val checked = if (breaksBalanceChain(settled)) settled.copy(needsReview = true) else settled
-        val rowId = transactionDao.insertIgnoringDuplicates(checked.toEntity(key, selfTransfer = isSelf))
+        // Each alert reports the wallet's new balance, so consecutive alerts form
+        // a chain. If this balance doesn't follow from the previous one, the
+        // message goes to review, even when it looks like a self-transfer.
+        //
+        // A live message that follows an unconfirmed break is also held, until
+        // the user confirms or clears the earlier row. The inbox import skips
+        // this second check, because real inboxes often have gaps.
+        val anchor = transactionDao.lastBalanceBefore(txn.institution.name, txn.occurredAt.toEpochMilli())
+        val chainBreak = breaksBalanceChain(settled, anchor) || (live && anchor?.untrusted == true && settled.balanceAfter != null)
+        val checked = if (chainBreak) settled.copy(needsReview = true) else settled
+            // Cash-outs and cash-ins wait for the user to say whether they moved cash.
+            .let { if (it.cashMovement && !isSelf) it.copy(needsReview = true) else it }
+        val rowId = transactionDao.insertIgnoringDuplicates(
+            checked.toEntity(key, selfTransfer = isSelf).copy(chainBreak = chainBreak),
+        )
         return rowId != -1L
     }
 
     /**
-     * True when [txn]'s reported balance does not follow from the balance this
-     * institution last reported.
+     * True when [txn]'s balance doesn't follow from the last balance this
+     * provider reported.
      *
-     * Sender IDs are unauthenticated and spoofable, so a message that parses
-     * cleanly is not evidence it came from the provider. The running balance is:
-     * an injected transaction has to guess the victim's current balance to land
-     * without contradicting the chain, and a suppression attempt shows up the
-     * same way, as arithmetic that no longer follows.
-     *
-     * A genuinely missed message — phone off, deleted SMS, an inbox import with
-     * gaps — breaks the chain identically, and nothing can distinguish the two
-     * from a single message. That is why this only routes to the review queue
-     * and never rejects: the cost of a false positive is one confirmation tap,
-     * the cost of a false negative is a silently corrupted ledger.
+     * Sender names on SMS can be faked, so a message that parses cleanly isn't
+     * proof it came from the provider. A balance that doesn't add up is a sign
+     * something is wrong. A missed message looks the same, though, so this only
+     * sends the row to review and never rejects it.
      */
-    private suspend fun breaksBalanceChain(txn: Transaction): Boolean {
+    private fun breaksBalanceChain(txn: Transaction, anchor: BalanceAnchor?): Boolean {
         val balanceAfter = txn.balanceAfter ?: return false
-        val previous = transactionDao.lastBalanceBefore(
-            institution = txn.institution.name,
-            at = txn.occurredAt.toEpochMilli(),
-        ) ?: return false          // nothing to chain against yet
+        val previous = anchor ?: return false  // nothing to compare with yet
 
         return !BalanceChain.follows(
-            previousBalance = Money(previous),
+            previousBalance = Money(previous.balanceMinor),
             direction = txn.direction,
             amount = txn.amount,
             fee = txn.fee,
@@ -165,25 +217,24 @@ class LedgerRepository @Inject constructor(
         )
     }
 
-    // ---- The user's own accounts (self-transfer detection) ----
+    // ---- The user's own accounts ----
 
     fun observeOwnAccounts() = ownAccountDao.observeAll()
 
-    /** Every registered alias, for showing each account's names in Settings. */
     fun observeOwnAccountNames() = ownAccountNameDao.observeAll()
 
     private suspend fun ownAccountMatcher(): OwnAccountMatcher =
-        OwnAccountMatcher(ownAccountDao.keys().toSet(), ownAccountNameDao.names().toSet())
+        matcherCache ?: OwnAccountMatcher(
+            ownAccountDao.keys().toSet(),
+            ownAccountNameDao.names().toSet(),
+        ).also { matcherCache = it }
 
     /**
-     * Registers one of the user's own numbers/accounts. Returns false when it
-     * carries no usable account number. Adding one re-marks history, so past
-     * internal transfers stop counting as spending immediately.
+     * Adds one of the user's own wallets and re-marks history, so past transfers
+     * between them stop counting as spending. Returns false without a usable number.
      *
-     * [institution] records which wallet the number belongs to (display only).
-     * [names] are the labels providers print for this account instead of its
-     * number — the thing that makes an MTN "received from AMA OWUSU" alert
-     * recognisable as the user's own money arriving.
+     * [names] are the labels providers print instead of the number, such as the
+     * account holder's name on a "received from" alert.
      */
     suspend fun addOwnAccount(
         identifier: String,
@@ -193,10 +244,7 @@ class LedgerRepository @Inject constructor(
     ): Boolean {
         val key = AccountKey.of(identifier) ?: return false
         val provider = institution ?: OwnAccountEntity.ANY_PROVIDER
-        // Re-adding the same wallet edits it; the same number under a different
-        // provider is a different wallet and gets its own row. Resolving the id
-        // first is what makes those two cases distinguishable — an upsert on the
-        // number alone could only ever do the first.
+        // Same number and provider edits the wallet; another provider is a new wallet.
         val existingId = ownAccountDao.idFor(key, provider)
         val id = ownAccountDao.upsert(
             OwnAccountEntity(
@@ -208,8 +256,7 @@ class LedgerRepository @Inject constructor(
                 institution = provider,
             )
         ).let { rowId -> if (rowId == -1L) existingId!! else rowId }
-        // The dialog hands back the account's whole alias set, so replace rather
-        // than merge — otherwise a name removed there would live on in matching.
+        // The dialog sends the full set of names, so replace rather than merge.
         ownAccountNameDao.deleteForAccount(id)
         names.forEach { raw ->
             val normalised = OwnAccountMatcher.normaliseName(raw) ?: return@forEach
@@ -217,6 +264,7 @@ class LedgerRepository @Inject constructor(
                 OwnAccountNameEntity(name = normalised, accountId = id, display = raw.trim()),
             )
         }
+        invalidateOwnAccounts()
         refreshSelfTransfers()
         return true
     }
@@ -224,14 +272,13 @@ class LedgerRepository @Inject constructor(
     suspend fun removeOwnAccount(id: Long) {
         ownAccountDao.delete(id)
         ownAccountNameDao.deleteForAccount(id)
+        invalidateOwnAccounts()
         refreshSelfTransfers()
     }
 
     /**
-     * Re-marks every transaction against the current own-account set. Rows
-     * captured before a match column existed are backfilled first (a one-off,
-     * after which neither key column is ever null), then the marking itself is a
-     * single SQL UPDATE rather than a read-modify-write over the whole table.
+     * Re-marks every transaction against the current own accounts, filling in
+     * missing match keys first.
      */
     suspend fun refreshSelfTransfers(): Int {
         transactionDao.rowsMissingCounterpartyKey().forEach { row ->
@@ -241,16 +288,13 @@ class LedgerRepository @Inject constructor(
             transactionDao.setReferenceKeys(row.id, packReferenceKeys(row.referenceHint))
         }
         val marked = transactionDao.recomputeSelfTransfers()
-        // Moving your own money needs no decision from the user — file it rather
-        // than leaving it in the review queue.
         transactionDao.fileSelfTransfers(TRANSFERS_CATEGORY)
         return marked
     }
 
     /**
-     * Called when the user confirms a reviewed transaction. Updates the row and,
-     * if requested, mints a {counterparty, direction} rule so future messages
-     * from this sender auto-categorize.
+     * Confirms a reviewed transaction and, if asked, creates a rule for this
+     * sender and direction.
      */
     data class ConfirmResult(val alsoCleared: Int)
 
@@ -261,24 +305,23 @@ class LedgerRepository @Inject constructor(
         note: String?,
         createRule: Boolean,
     ): ConfirmResult {
-        // The confirmed transaction always gets the user's note (notes are
-        // per-transaction; a rule never carries one).
+        // Notes belong to one transaction; rules never carry them.
         transactionDao.update(
-            entity.copy(category = category, person = person, notes = note, needsReview = false)
+            entity.copy(
+                category = category, person = person, notes = note, needsReview = false,
+                cashMove = entity.cashMove.answeredNo(),
+            )
         )
 
         var alsoCleared = 0
         if (createRule && !entity.counterparty.isNullOrBlank()) {
-            // Dedup: reuse the existing {counterparty, direction} rule if one is
-            // already present, so confirming a second message from the same sender
-            // updates that rule instead of minting a duplicate.
+            // Reuse the sender's existing rule rather than adding a second one.
             val existing = ruleDao.findFor(entity.counterparty, entity.direction)
             val rule = categorizer.proposeRule(existing?.id ?: 0L, entity.toDomain(), category, person)
             ruleDao.upsert(rule.toEntity().copy(id = existing?.id ?: 0L))
+            invalidateRules()
 
-            // Retroactively clear the rest of the review backlog for this sender +
-            // direction so repeated charges (data/airtime, etc.) don't have to be
-            // sorted one by one.
+            // File the rest of this sender's queue the same way.
             alsoCleared = transactionDao.applyRuleToPending(
                 counterparty = entity.counterparty,
                 direction = entity.direction,
@@ -289,18 +332,23 @@ class LedgerRepository @Inject constructor(
         return ConfirmResult(alsoCleared = alsoCleared)
     }
 
-    // ---- Read side (exposed as Flows to the ViewModels) ----
+    // ---- Reads ----
 
     fun observeTransaction(id: Long) = transactionDao.observeById(id)
     fun observeReviewQueue() = transactionDao.observeReviewQueue()
     fun observeReviewCount() = transactionDao.observeReviewCount()
+    fun observeReviewCountBefore(before: Long) = transactionDao.observeReviewCountBefore(before)
 
-    /** Total rows in the ledger — the first-run signal for the dashboard. */
+    /**
+     * Empties the review queue, or only the part dated before [before]. Nothing is
+     * deleted; the rows stay in History and in the totals.
+     */
+    suspend fun clearReview(before: Long?): Int = transactionDao.clearReview(before)
+
+    /** Total rows; zero means a first run. */
     fun observeTransactionCount() = transactionDao.observeCount()
     fun observeRecent(limit: Int = 6) = transactionDao.observeRecent(limit)
-    fun search(query: String) = transactionDao.search(query)
 
-    /** SQL-side filtered + sorted history (all work off the main thread). */
     fun filterHistory(
         query: String,
         direction: String?,
@@ -312,40 +360,183 @@ class LedgerRepository @Inject constructor(
         sort: String,
     ) = transactionDao.filter(query, direction, category, institution, reviewOnly, from, to, sort)
 
-    /** Institutions the ledger actually holds data from (History sender filter). */
+    /** Providers the ledger has data from, for the History filter. */
     fun observeInstitutions() = transactionDao.observeInstitutions()
     fun observeTotal(direction: String, from: Long, to: Long) =
         transactionDao.observeTotal(direction, from, to)
     fun observeTopCategories(from: Long, to: Long, limit: Int = 5) =
         transactionDao.observeTopCategories(from, to, limit)
 
-    /** Every category for one direction in a window — the dashboard's top five
-     *  without the limit, and with uncategorised rows kept in. */
+    /** Every category for one direction in a window, uncategorised included. */
     fun observeCategoryBreakdown(direction: String, from: Long, to: Long) =
         transactionDao.observeCategoryBreakdown(direction, from, to)
     fun observeDailyFlow(from: Long, to: Long) = transactionDao.observeDailyFlow(from, to)
     fun observeLargestExpenses(from: Long, to: Long, limit: Int = 5) =
         transactionDao.observeLargestExpenses(from, to, limit)
     fun observeRules() = ruleDao.observeAll()
-    fun observeSenders() = senderDao.observeAll()
 
-    // ---- Transaction editing (the detail screen + bulk actions) ----
+    // ---- Editing ----
 
-    /** Persists an edited transaction. Editing a category clears the review flag. */
     suspend fun updateTransaction(txn: TransactionEntity) = transactionDao.update(txn)
 
-    suspend fun deleteTransaction(id: Long) = transactionDao.deleteById(id)
+    suspend fun deleteTransaction(id: Long) = deleteTransactions(listOf(id))
 
-    suspend fun deleteTransactions(ids: List<Long>) = transactionDao.deleteByIds(ids)
-
-    /** Bulk-categorises the given transactions, clearing their review flag. */
-    suspend fun setCategoryFor(ids: List<Long>, category: String) {
-        transactionDao.getByIds(ids).forEach {
-            transactionDao.update(it.copy(category = category, needsReview = false))
+    /**
+     * Deletes rows. Deleting a moved withdrawal removes its cash entry, and
+     * deleting the cash entry puts the withdrawal back.
+     */
+    suspend fun deleteTransactions(ids: List<Long>) {
+        val rows = transactionDao.getByIds(ids)
+        transactionDao.deleteByIds(ids)
+        val mirrors = rows.filter { it.cashMove == CashMove.MOVED }.map { CashMove.pairKey(it.dedupKey) }
+        if (mirrors.isNotEmpty()) transactionDao.deleteByDedupKeys(mirrors)
+        val sources = rows.filter { it.cashMove == CashMove.PAIR }.map { CashMove.sourceKey(it.dedupKey) }
+        if (sources.isNotEmpty()) {
+            transactionDao.unmoveCash(sources)
+            refreshSelfTransfers()
         }
     }
 
-    // ---- Export / import (Phase 5) ----
+    // ---- Cash ----
+
+    fun observeCashBalance() = transactionDao.observeCashBalance()
+
+    fun observeCash() = transactionDao.observeCash()
+
+    suspend fun addCashEntry(
+        direction: Direction,
+        amountMinor: Long,
+        category: String?,
+        description: String?,
+        note: String?,
+        occurredAt: Long,
+    ) {
+        require(amountMinor > 0) { "amount must be positive" }
+        transactionDao.insertIgnoringDuplicates(
+            cashRow(
+                dedupKey = CashMove.manualKey(),
+                direction = direction,
+                amountMinor = amountMinor,
+                counterparty = description?.trim()?.ifBlank { null },
+                occurredAt = occurredAt,
+                category = category,
+            ).copy(notes = note?.trim()?.ifBlank { null }),
+        )
+    }
+
+    /**
+     * Moves a wallet withdrawal or deposit to cash: the wallet row becomes a
+     * self-transfer and a matching cash entry is added. Safe to repeat.
+     */
+    suspend fun moveToCash(source: TransactionEntity) {
+        if (source.institution == Institution.CASH.name || source.cashMove == CashMove.MOVED) return
+        val wallet = runCatching { Institution.valueOf(source.institution).displayName }
+            .getOrDefault(source.institution)
+        transactionDao.insertIgnoringDuplicates(
+            cashRow(
+                dedupKey = CashMove.pairKey(source.dedupKey),
+                direction = if (source.direction == Direction.DEBIT.name) Direction.CREDIT else Direction.DEBIT,
+                amountMinor = source.amountMinor,
+                counterparty = wallet,
+                occurredAt = source.occurredAt,
+                category = TRANSFERS_CATEGORY,
+            ).copy(selfTransfer = true, cashMove = CashMove.PAIR),
+        )
+        transactionDao.update(
+            source.copy(
+                cashMove = CashMove.MOVED, selfTransfer = true,
+                category = TRANSFERS_CATEGORY, needsReview = false,
+            ),
+        )
+    }
+
+    suspend fun cashBalance(): Long = transactionDao.cashBalance()
+
+    /** Sets cash on hand by recording the difference as an adjustment. */
+    suspend fun setCashOnHand(targetMinor: Long) {
+        adjustCash(targetMinor - transactionDao.cashBalance())
+    }
+
+    /** Changes cash on hand without counting as income or spending. */
+    suspend fun adjustCash(deltaMinor: Long) {
+        if (deltaMinor == 0L) return
+        transactionDao.insertIgnoringDuplicates(
+            cashRow(
+                dedupKey = CashMove.manualKey(),
+                direction = if (deltaMinor > 0) Direction.CREDIT else Direction.DEBIT,
+                amountMinor = kotlin.math.abs(deltaMinor),
+                counterparty = CASH_ADJUSTMENT,
+                occurredAt = System.currentTimeMillis(),
+                category = null,
+            ).copy(selfTransfer = true, cashMove = CashMove.OPENING),
+        )
+    }
+
+    /** Money in minus money out before [before], for the savings carry-over. */
+    fun observeSavingsBefore(before: Long): Flow<Long> = combine(
+        transactionDao.observeTotal("CREDIT", 0, before - 1),
+        transactionDao.observeTotal("DEBIT", 0, before - 1),
+    ) { credit, debit -> credit - debit }
+
+    /**
+     * "Not cash": stop asking. A row that already has a category leaves the
+     * queue; an unsorted one stays to be filed.
+     */
+    suspend fun keepOutOfCash(source: TransactionEntity) {
+        if (source.cashMove != CashMove.OFFER) return
+        transactionDao.update(
+            source.copy(
+                cashMove = CashMove.KEPT,
+                needsReview = source.needsReview && source.category == null,
+            ),
+        )
+    }
+
+    /** Undoes [moveToCash]; the wallet row goes back to the queue. */
+    suspend fun undoMoveToCash(source: TransactionEntity) {
+        if (source.cashMove != CashMove.MOVED) return
+        transactionDao.deleteByDedupKeys(listOf(CashMove.pairKey(source.dedupKey)))
+        transactionDao.unmoveCash(listOf(source.dedupKey))
+        refreshSelfTransfers()
+    }
+
+    private fun cashRow(
+        dedupKey: String,
+        direction: Direction,
+        amountMinor: Long,
+        counterparty: String?,
+        occurredAt: Long,
+        category: String?,
+    ) = TransactionEntity(
+        dedupKey = dedupKey,
+        reference = null,
+        institution = Institution.CASH.name,
+        direction = direction.name,
+        amountMinor = amountMinor,
+        balanceMinor = null,
+        feeMinor = null,
+        currency = "GHS",
+        counterparty = counterparty,
+        referenceHint = null,
+        occurredAt = occurredAt,
+        capturedAt = System.currentTimeMillis(),
+        category = category,
+        person = null,
+        notes = null,
+        needsReview = false,
+        // Cash has no account number, so it never matches one of the user's
+        // wallets. It is empty rather than null so the key backfill skips it.
+        counterpartyKey = "",
+        referenceKeys = "",
+    )
+
+    suspend fun setCategoryFor(ids: List<Long>, category: String) {
+        transactionDao.getByIds(ids).forEach {
+            transactionDao.update(it.copy(category = category, needsReview = false, cashMove = it.cashMove.answeredNo()))
+        }
+    }
+
+    // ---- Export and import ----
 
     suspend fun transactionCount(): Int = transactionDao.count()
 
@@ -355,6 +546,7 @@ class LedgerRepository @Inject constructor(
         categories = categoryDao.getAll(),
         ownAccounts = ownAccountDao.getAll(),
         ownAccountNames = ownAccountNameDao.getAll(),
+        budgets = budgetDao.getAll(),
     )
 
     suspend fun exportCsv(): String = LedgerTransfer.toCsv(transactionDao.getAll())
@@ -362,77 +554,148 @@ class LedgerRepository @Inject constructor(
     data class ImportResult(val added: Int, val skipped: Int)
 
     /**
-     * Merges (or, when [replace], first wipes) a decoded backup into the DB.
-     * Transactions are inserted respecting the unique dedup key, so re-importing
-     * the same file is a safe no-op. Categories are added only when their name is
-     * new; rules are only rebuilt on a full replace to avoid priority conflicts.
+     * Merges a backup into the ledger. Nothing already here is deleted.
+     *
+     * Transactions match on their dedup key; categories on name, rules on
+     * counterparty and direction, wallets on number and provider. Where both sides
+     * have a row, the device's copy wins. [ImportResult.skipped] counts rows that
+     * were already here.
      */
-    suspend fun importBackup(backup: BackupFile, replace: Boolean): ImportResult {
-        if (replace) {
-            transactionDao.clearAll()
-            ruleDao.clearAll()
-            categoryDao.clearAll()
-            ownAccountDao.clearAll()
-            ownAccountNameDao.clearAll()
-        }
+    suspend fun importBackup(backup: BackupFile): ImportResult {
+        val result = database.withTransaction { importBackupRows(backup) }
+        // Clear the caches again now the restore is committed. A message captured
+        // during the restore could have refilled them with the old data.
+        invalidateRules()
+        invalidateOwnAccounts()
+        return result
+    }
+
+    /** The body of [importBackup], in one transaction so it lands whole or not at all. */
+    private suspend fun importBackupRows(backup: BackupFile): ImportResult {
         var added = 0
         var skipped = 0
         backup.transactions.forEach { dto ->
+            // Rows above the ceiling are skipped.
+            val cap = Money.CEILING.minor
+            if (dto.amountMinor !in 0..cap || (dto.balanceMinor ?: 0) > cap || (dto.feeMinor ?: 0) !in 0..cap) {
+                skipped++
+                return@forEach
+            }
             val rowId = transactionDao.insertIgnoringDuplicates(dto.toEntity())
             if (rowId != -1L) added++ else skipped++
         }
+        // An existing category is kept as is; the backup can only switch it back on.
         backup.categories.forEach { dto ->
-            if (categoryDao.findByName(dto.name) == null) categoryDao.upsert(dto.toEntity())
+            val existing = categoryDao.findByName(dto.name)
+            if (existing == null) {
+                categoryDao.upsert(dto.toEntity().copy(position = categoryDao.maxPosition() + 1))
+            } else if (dto.enabled && !existing.enabled) {
+                categoryDao.upsert(existing.copy(enabled = true))
+            }
         }
-        if (replace) backup.rules.forEach { ruleDao.upsert(it.toEntity()) }
-        // Own accounts must land before the recompute below, or every restored
-        // internal transfer would be marked as ordinary spending. Merged by key
-        // on a non-replace import, so restoring alongside existing accounts
-        // neither duplicates nor drops either side's aliases.
+        // Rules match on counterparty and direction, so none are duplicated.
+        backup.rules.forEach { dto ->
+            if (ruleDao.findFor(dto.counterparty, dto.direction) == null) {
+                ruleDao.upsert(dto.toEntity())
+            }
+        }
+        // Own accounts go in before the recompute below, or restored transfers would
+        // count as spending.
         backup.ownAccounts.forEach { dto ->
             val provider = dto.institution ?: OwnAccountEntity.ANY_PROVIDER
             val existingId = ownAccountDao.idFor(dto.key, provider)
             val id = ownAccountDao.upsert(dto.toEntity(existingId ?: 0))
                 .let { rowId -> if (rowId == -1L) existingId!! else rowId }
-            ownAccountNameDao.deleteForAccount(id)
-            dto.toNameEntities(id).forEach { ownAccountNameDao.upsert(it) }
+            // Only replace a wallet's names when the backup has some.
+            val restored = dto.toNameEntities(id)
+            if (restored.isNotEmpty()) {
+                ownAccountNameDao.deleteForAccount(id)
+                restored.forEach { ownAccountNameDao.upsert(it) }
+            }
         }
-        // Imported rows arrive without match keys — derive them and mark any that
-        // land on one of the user's own accounts.
+        // The device's limit wins; the backup only fills in missing ones.
+        backup.budgets.forEach { dto ->
+            if (budgetDao.find(dto.category) == null) budgetDao.upsert(dto.toEntity())
+        }
+        // Imported rows have no match keys yet.
+        invalidateRules()
+        invalidateOwnAccounts()
+        transactionDao.linkMovedCash()
         refreshSelfTransfers()
+        repairCategories()
         return ImportResult(added, skipped)
     }
 
-    // ---- Rule management (the manual rule editor) ----
+    // ---- Budgets ----
 
-    /** Insert or update a rule. New rules pass id = 0 (Room auto-generates). */
-    suspend fun saveRule(rule: RuleEntity): Long = ruleDao.upsert(rule)
+    fun observeBudgets() = budgetDao.observeAll()
 
-    suspend fun deleteRule(id: Long) = ruleDao.delete(id)
+    /**
+     * Each budget against its spending in [from, to], using the dashboard's own
+     * query so the two always agree. A budget with no spending shows at zero.
+     */
+    fun observeBudgetStatuses(from: Long, to: Long): Flow<List<BudgetStatus>> =
+        combine(
+            budgetDao.observeAll(),
+            transactionDao.observeCategoryBreakdown("DEBIT", from, to),
+        ) { budgets, slices ->
+            val spentByCategory = slices.associate { it.label to it.totalMinor }
+            budgets.map { budget ->
+                BudgetStatus(
+                    category = budget.category,
+                    limitMinor = budget.limitMinor,
+                    spentMinor = spentByCategory[budget.category] ?: 0L,
+                )
+            }.sortedByDescending { it.fraction }
+        }
 
-    // ---- Category management (the category editor) ----
+    /** One-shot read, for the alert check after a capture. */
+    suspend fun budgetStatuses(from: Long, to: Long): List<BudgetStatus> =
+        observeBudgetStatuses(from, to).first()
+
+    /**
+     * Sets a category's monthly limit. A limit of zero or less is ignored, not
+     * treated as a removal; [removeBudget] does that.
+     */
+    suspend fun setBudget(category: String, limitMinor: Long) {
+        if (limitMinor <= 0) return
+        budgetDao.upsert(
+            BudgetEntity(
+                category = category,
+                limitMinor = limitMinor,
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    suspend fun removeBudget(category: String) = budgetDao.delete(category)
+
+    // ---- Rules ----
+
+    /** Inserts or updates a rule; new rules pass id = 0. */
+    suspend fun saveRule(rule: RuleEntity): Long = ruleDao.upsert(rule).also { invalidateRules() }
+
+    suspend fun deleteRule(id: Long) = ruleDao.delete(id).also { invalidateRules() }
+
+    // ---- Categories ----
 
     fun observeCategories() = categoryDao.observeAll()
 
-    /**
-     * Enabled category names, in display order, already split by direction —
-     * what the pickers show.
-     *
-     * One query feeds both lists: partitioning here rather than at each call site
-     * means a Review screen with a card per queued transaction isn't re-filtering
-     * the whole set on every recomposition.
-     */
-    fun observeCategoryOptions(): kotlinx.coroutines.flow.Flow<CategoryOptions> =
+    /** Enabled category names in display order, split by direction, for the pickers. */
+    fun observeCategoryOptions(): Flow<CategoryOptions> =
         categoryDao.observeEnabled().map { rows ->
-            if (rows.isEmpty()) return@map CategoryOptions()   // pre-seed fallback
+            if (rows.isEmpty()) return@map CategoryOptions()  // not seeded yet
+            val out = rows.filter { it.kind != CategoryKind.IN.name }
+            val income = rows.filter { it.kind != CategoryKind.OUT.name }
             CategoryOptions(
-                spending = rows.filter { it.kind != CategoryKind.IN.name }.map { it.name },
-                income = rows.filter { it.kind != CategoryKind.OUT.name }.map { it.name },
+                spending = out.map { it.name },
+                income = income.map { it.name },
+                quickSpending = out.filter { it.favorite }.map { it.name },
+                quickIncome = income.filter { it.favorite }.map { it.name },
             )
         }
 
-    /** Adds a category at the end of the list. No-op if the name already exists
-     *  (case-insensitive). Returns true when a new category was created. */
+    /** Adds a category at the end. Returns false if the name exists (any case). */
     suspend fun addCategory(name: String, kind: CategoryKind = CategoryKind.OUT): Boolean {
         val clean = name.trim()
         if (clean.isEmpty() || categoryDao.findByName(clean) != null) return false
@@ -446,28 +709,20 @@ class LedgerRepository @Inject constructor(
 
     suspend fun deleteCategory(id: Long) = categoryDao.delete(id)
 
-    /** Moves a category to the other side of the ledger (or to both). */
+    /** Moves a category to money in, money out, or both. */
     suspend fun setCategoryKind(category: CategoryEntity, kind: CategoryKind) {
         categoryDao.upsert(category.copy(kind = kind.name))
     }
 
-    /** Swaps two categories' positions to reorder them (drives the accessibility
-     *  move actions, which step a row one slot at a time). */
+    /** Swaps two categories, for the one-step accessibility move actions. */
     suspend fun swapCategoryOrder(a: CategoryEntity, b: CategoryEntity) {
         categoryDao.upsert(a.copy(position = b.position))
         categoryDao.upsert(b.copy(position = a.position))
     }
 
     /**
-     * Renumbers the whole table to match [ids] — how a drag-and-drop reorder is
-     * committed.
-     *
-     * Takes the entire order rather than a from/to pair because a drag ends
-     * having crossed any number of rows, and because renumbering densely from
-     * zero is what keeps the stored positions meaning the same thing as the
-     * order the editor shows. Rows already sitting at their new index are left
-     * alone, so the common case (a row moved two slots) writes two rows, not
-     * thirty.
+     * Saves a drag-and-drop reorder by renumbering to match [ids]. Rows already in
+     * place are not rewritten.
      */
     suspend fun reorderCategories(ids: List<Long>) {
         val byId = categoryDao.getAll().associateBy { it.id }
@@ -478,87 +733,88 @@ class LedgerRepository @Inject constructor(
     }
 
     /**
-     * Applies the shortlist from setup: [keep] stays enabled and moves to the
-     * front of its side of the ledger, everything else is switched off.
-     *
-     * Disabled rather than deleted, deliberately. The categories the user didn't
-     * pick are still the sensible defaults, still carry their icon and colour,
-     * and a single switch in the editor brings any of them back — whereas a
-     * delete is unrecoverable and would orphan the label on any transaction
-     * already filed under it.
-     *
-     * Ordering is the other half of the point: the picked ones are what Review
-     * offers inline without opening the sheet, and that list is taken off the
-     * front of this order.
+     * Applies the setup shortlist: [top] become favourites and move to the front
+     * of their side. Nothing is switched off; the rest stay behind "More". A
+     * hidden category that is picked is shown again.
      */
-    suspend fun applyCategoryShortlist(keep: Set<String>) {
+    suspend fun applyCategoryFavourites(top: Set<String>) {
         val all = categoryDao.getAll()
         if (all.isEmpty()) return
-        // Stable within each half: the seed order is already roughly
-        // most-reached-for first, so preserving it beats anything we'd invent.
-        val (picked, rest) = all.partition { it.name in keep }
+        // Keeps the seed order within each half.
+        val (picked, rest) = all.partition { it.name in top }
         val ordered = CategoryKind.DISPLAY_ORDER.flatMap { kind ->
             val side = { row: CategoryEntity -> row.kind == kind.name }
             picked.filter(side) + rest.filter(side)
         }
         val rows = ordered.mapIndexed { index, row ->
-            row.copy(position = index, enabled = row.name in keep)
-        }.filter { updated ->
-            all.first { it.id == updated.id }.let { it.position != updated.position || it.enabled != updated.enabled }
-        }
+            val isTop = row.name in top
+            row.copy(position = index, favorite = isTop, enabled = row.enabled || isTop)
+        }.filter { updated -> all.first { it.id == updated.id } != updated }
         if (rows.isNotEmpty()) categoryDao.upsertAll(rows)
     }
 
-    /** Seeds the default category set on first run (idempotent — a no-op once
-     *  any category exists, so it also safely covers the v1 -> v2 migration). */
+    /** Adds or removes one favourite, from the editor. */
+    suspend fun setCategoryFavorite(category: CategoryEntity, favorite: Boolean) {
+        // A favourite can't be hidden.
+        categoryDao.upsert(
+            category.copy(favorite = favorite, enabled = category.enabled || favorite),
+        )
+    }
+
+    /**
+     * Adds back labels still used by transactions, rules or budgets but missing
+     * from the category list. Run at start-up and after a restore.
+     */
+    suspend fun repairCategories(): Int {
+        val orphans = categoryDao.orphaned()
+        if (orphans.isEmpty()) return 0
+        val first = categoryDao.maxPosition() + 1
+        categoryDao.insertAll(
+            orphans.mapIndexed { i, o -> CategoryEntity(name = o.name, position = first + i, kind = o.kind) },
+        )
+        return orphans.size
+    }
+
+    /** Adds back any missing default categories at the end. Returns how many. */
+    suspend fun restoreDefaultCategories(): Int {
+        val have = categoryDao.getAll().map { it.name.lowercase() }.toSet()
+        val missing = DefaultCategories.ALL.filter { it.name.lowercase() !in have }
+        if (missing.isEmpty()) return 0
+        val first = categoryDao.maxPosition() + 1
+        categoryDao.insertAll(
+            missing.mapIndexed { i, c -> CategoryEntity(name = c.name, position = first + i, kind = c.kind.name) },
+        )
+        return missing.size
+    }
+
+    /**
+     * Adds the defaults introduced after version [since] (see
+     * [DefaultCategories.ADDED]) at the end of the list, skipping any name the
+     * ledger already has. Returns how many were added.
+     */
+    suspend fun addNewDefaultCategories(since: Int): Int {
+        val names = DefaultCategories.ADDED.filterKeys { it > since }.values.flatten()
+        val have = categoryDao.getAll().map { it.name.lowercase() }.toSet()
+        val missing = DefaultCategories.ALL.filter { it.name in names && it.name.lowercase() !in have }
+        if (missing.isEmpty()) return 0
+        val first = categoryDao.maxPosition() + 1
+        categoryDao.insertAll(
+            missing.mapIndexed { i, c -> CategoryEntity(name = c.name, position = first + i, kind = c.kind.name) },
+        )
+        return missing.size
+    }
+
+    /** Seeds the default categories when there are none. */
     suspend fun ensureCategoriesSeeded() {
         if (categoryDao.count() > 0) return
         categoryDao.insertAll(DefaultCategories.entities())
     }
 
-    /** Institutions the user has enabled for live capture (empty = capture all). */
-    suspend fun enabledInstitutions(): Set<Institution> =
-        senderDao.enabled().mapNotNull { runCatching { Institution.valueOf(it.institution) }.getOrNull() }.toSet()
-
-    // ---- Onboarding: "paste one message so the app can learn the format" ----
-
-    data class Detection(
-        val recognised: Boolean,
-        val institution: Institution?,
-        val preview: Transaction?,
-    )
-
-    /**
-     * Runs the pasted sample through the parser against every known institution
-     * and reports whether the strict template recognises it. Used by the
-     * "Add a sender" onboarding step before enabling live capture.
-     */
-    fun detectSample(body: String, now: Instant = Instant.now()): Detection {
-        for (inst in Institution.entries) {
-            val senderId = inst.senderIds.first()
-            when (val r = parser.parse(IncomingSms(senderId, body, now))) {
-                is ParseResult.Parsed -> return Detection(true, inst, r.transaction)
-                is ParseResult.NeedsAttention -> return Detection(false, inst, null)
-                else -> Unit
-            }
-        }
-        return Detection(false, null, null)
-    }
-
-    suspend fun enableSender(institution: Institution) {
-        senderDao.upsert(
-            com.ledger.app.data.db.SenderEntity(
-                institution = institution.name,
-                displayName = institution.displayName,
-                liveCaptureEnabled = true,
-                addedAt = System.currentTimeMillis(),
-            )
-        )
-    }
-
     companion object {
-        /** Where recognised own-account movements are filed. The one label that
-         *  belongs to both directions — see [DefaultCategories]. */
+        /** Where own-account transfers are filed; used for both directions. */
         const val TRANSFERS_CATEGORY = DefaultCategories.TRANSFERS
+
+        /** The name of a cash-on-hand adjustment. */
+        const val CASH_ADJUSTMENT = "Cash on hand"
     }
 }

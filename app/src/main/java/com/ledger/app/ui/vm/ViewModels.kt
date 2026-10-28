@@ -7,6 +7,9 @@ import com.ledger.app.data.backup.LedgerTransfer
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ledger.app.data.budget.BudgetAlerter
+import com.ledger.app.data.budget.BudgetStatus
+import com.ledger.app.data.db.CashMove.answeredNo
 import com.ledger.app.data.db.CategoryEntity
 import com.ledger.app.data.db.CategoryKind
 import com.ledger.app.data.db.CategoryOptions
@@ -14,7 +17,10 @@ import com.ledger.app.data.db.CategorySlice
 import com.ledger.app.data.db.CategoryTotal
 import com.ledger.app.data.db.DayFlow
 import com.ledger.app.data.db.DefaultCategories
+import com.ledger.app.data.prefs.PeriodPrefs
 import com.ledger.app.data.prefs.SetupPrefs
+import com.ledger.app.data.prefs.bounds
+import com.ledger.app.data.prefs.label
 import com.ledger.app.data.db.OwnAccountEntity
 import com.ledger.app.data.db.RuleEntity
 import com.ledger.app.data.db.TransactionEntity
@@ -25,18 +31,23 @@ import com.ledger.app.ui.components.institutionLabel
 import com.ledger.app.tutorial.TutorialManager
 import com.ledger.app.tutorial.TutorialState
 import com.ledger.app.tutorial.TutorialStep
+import com.ledger.domain.model.Direction
+import com.ledger.domain.model.FiscalMonth
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -46,12 +57,28 @@ import java.time.LocalDate
 import java.time.ZoneId
 import javax.inject.Inject
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
-private fun monthBounds(ref: LocalDate = LocalDate.now(ZoneId.systemDefault())): Pair<Long, Long> {
-    val zone = ZoneId.systemDefault()
-    val from = ref.withDayOfMonth(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    val to = ref.plusMonths(1).withDayOfMonth(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
-    return from to to
+/**
+ * The user's current month and the dates it covers. The month either follows
+ * the calendar or starts on a day the user chose (see [FiscalMonth]).
+ */
+private data class PeriodWindow(val fiscal: FiscalMonth, val start: LocalDate) {
+    val bounds: Pair<Long, Long> get() = fiscal.bounds(start)
+    val previous: PeriodWindow get() = PeriodWindow(fiscal, fiscal.shift(start, -1))
+    val label: String get() = fiscal.label(start)
+}
+
+/**
+ * The period containing today, worked out again whenever the start day changes.
+ *
+ * Collect this once per subscription, not once per ViewModel. A ViewModel can
+ * live past the end of a month, and it would then keep showing last month's
+ * figures under this month's heading.
+ */
+private fun PeriodPrefs.current(): Flow<PeriodWindow> = startDay.map { day ->
+    val fiscal = FiscalMonth(day)
+    PeriodWindow(fiscal, fiscal.startOf(LocalDate.now(ZoneId.systemDefault())))
 }
 
 data class OverviewState(
@@ -63,25 +90,38 @@ data class OverviewState(
     val lastMonthSpentMinor: Long = 0,
     val avgDailyMinor: Long = 0,
     val reviewCount: Int = 0,
-    /** One value per day of the *whole* month (index 0 = the 1st), for the timeline. */
+    /** One value per day of the whole month (index 0 is the first day), for the timeline. */
     val dailySpendSeries: List<Long> = emptyList(),
     /** How many of those days have happened, so the rest can be drawn as pending. */
     val elapsedDays: Int = 0,
     val topCategories: List<CategoryTotal> = emptyList(),
     val largestExpenses: List<TransactionEntity> = emptyList(),
     val recent: List<TransactionEntity> = emptyList(),
+    /** This month's limits, worst first. Empty until the user sets one. */
+    val budgets: List<BudgetStatus> = emptyList(),
+    /** Cash on hand, from the cash ledger. */
+    val cashMinor: Long = 0,
+    /** The period on screen, such as "September 2026" or "28 Aug - 27 Sep". */
+    val periodLabel: String = "",
+    /** Savings left over from earlier months when carry-over is on, otherwise null. */
+    val carriedMinor: Long? = null,
+    /** A dashboard query failed. The screen shows what it can and says so. */
+    val loadFailed: Boolean = false,
 ) {
     val savingsMinor: Long get() = receivedMinor - spentMinor
 
-    /** True once the DB has been read and there is genuinely nothing captured —
-     *  the signal for the first-run welcome. Keyed on the whole ledger rather
-     *  than this month's totals, so a quiet month still shows the dashboard.
-     *  [loaded] guards against a welcome flash for users who do have data. */
+    /**
+     * True when the database has been read and nothing has ever been captured.
+     * This shows the first-run welcome. It checks the whole ledger, not this
+     * month, so a quiet month still shows the dashboard.
+     */
     val isFirstRun: Boolean
         get() = loaded && !hasAnyTransaction
 
-    /** Percent change in spend vs the same-length window last month; null until
-     *  there is a prior month to compare against. Positive = spending more. */
+    /**
+     * Percent change in spending compared with the same days last month. Positive
+     * means spending more. Null when there is no earlier month to compare with.
+     */
     val spendChangePct: Int?
         get() = if (lastMonthSpentMinor <= 0) null
         else ((spentMinor - lastMonthSpentMinor) * 100.0 / lastMonthSpentMinor).roundToInt()
@@ -98,71 +138,89 @@ private data class OverviewExtras(
     val totalCount: Int,
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
-class OverviewViewModel @Inject constructor(repo: LedgerRepository) : ViewModel() {
-    private val bounds = monthBounds()
-    private val lastBounds = monthBounds(LocalDate.now(ZoneId.systemDefault()).minusMonths(1))
+class OverviewViewModel @Inject constructor(
+    private val repo: LedgerRepository,
+    private val period: PeriodPrefs,
+) : ViewModel() {
 
-    private val core = combine(
-        repo.observeTotal("DEBIT", bounds.first, bounds.second),
-        repo.observeTotal("CREDIT", bounds.first, bounds.second),
-        repo.observeTopCategories(bounds.first, bounds.second),
+    private fun core(from: Long, to: Long) = combine(
+        repo.observeTotal("DEBIT", from, to),
+        repo.observeTotal("CREDIT", from, to),
+        repo.observeTopCategories(from, to),
         repo.observeRecent(6),
     ) { spent, received, top, recent -> OverviewCore(spent, received, top, recent) }
 
-    private val extras = combine(
-        repo.observeTotal("DEBIT", lastBounds.first, lastBounds.second),
-        repo.observeDailyFlow(bounds.first, bounds.second),
-        repo.observeLargestExpenses(bounds.first, bounds.second),
-        repo.observeReviewCount(),
-        repo.observeTransactionCount(),
-    ) { lastSpent, daily, largest, reviewCount, totalCount ->
-        OverviewExtras(lastSpent, daily, largest, reviewCount, totalCount)
+    private fun extras(window: PeriodWindow): Flow<OverviewExtras> {
+        val (from, to) = window.bounds
+        val (lastFrom, lastTo) = window.previous.bounds
+        return combine(
+            repo.observeTotal("DEBIT", lastFrom, lastTo),
+            repo.observeDailyFlow(from, to),
+            repo.observeLargestExpenses(from, to),
+            repo.observeReviewCount(),
+            repo.observeTransactionCount(),
+        ) { lastSpent, daily, largest, reviewCount, totalCount ->
+            OverviewExtras(lastSpent, daily, largest, reviewCount, totalCount)
+        }
     }
 
     /**
-     * Nine Room queries feed this dashboard, and every insert invalidates all of
-     * them. A background SMS backfill therefore fired hundreds of full
-     * recompositions of the heaviest screen in the app — the source of the
-     * multi-hundred-millisecond frames in the traces.
+     * Nine database queries feed the dashboard, and every insert refreshes all of
+     * them. During an inbox import that would redraw the screen hundreds of times.
      *
-     * The debounce collapses a burst into one update. It also delays the very
-     * first value, which is fine: the screen is showing its skeleton until this
-     * arrives, and the wait is dominated by the cold SQLCipher open anyway.
-     *
-     * `flowOn` matters as much as the debounce: `stateIn(viewModelScope)` collects
-     * on `Main.immediate`, so without it the transform below — a map build, an int
-     * parse per day of the month and a fresh list — ran on the main thread every
-     * time any of the nine queries fired.
+     * The debounce waits for a burst of updates to settle, then emits once.
+     * `flowOn` moves the work below off the main thread, because `stateIn` collects
+     * on the main thread by default.
      */
-    val state: StateFlow<OverviewState> = combine(core, extras) { c, e ->
-        val today = LocalDate.now(ZoneId.systemDefault())
-        val daysElapsed = today.dayOfMonth
-        // The series spans the whole month, not just the days that have happened.
-        // Sized to elapsed days it held two bars on the 2nd and twenty-eight on
-        // the 28th, so each was ~160dp wide at the start of a month and the card
-        // looked like a different component every week. A fixed span keeps the
-        // bar width constant and lets an early month read as what it is: mostly
-        // ahead of itself.
-        val daysInMonth = today.lengthOfMonth()
-        val spentByDom = e.daily.associate { it.day.substringAfterLast('-').toInt() to it.spentMinor }
-        OverviewState(
-            loaded = true,
-            hasAnyTransaction = e.totalCount > 0,
-            spentMinor = c.spent,
-            receivedMinor = c.received,
-            lastMonthSpentMinor = e.lastSpent,
-            avgDailyMinor = c.spent / daysElapsed.coerceAtLeast(1),
-            reviewCount = e.reviewCount,
-            dailySpendSeries = (1..daysInMonth).map { spentByDom[it] ?: 0L },
-            elapsedDays = daysElapsed,
-            topCategories = c.top,
-            largestExpenses = e.largest,
-            recent = c.recent,
-        )
+    val state: StateFlow<OverviewState> = period.current().flatMapLatest { window ->
+        val (from, to) = window.bounds
+        combine(
+            core(from, to),
+            extras(window),
+            repo.observeBudgetStatuses(from, to),
+            repo.observeCashBalance(),
+            period.carryOver.flatMapLatest { on ->
+                if (on) repo.observeSavingsBefore(from).map<Long, Long?> { it } else flowOf(null)
+            },
+        ) { c, e, budgets, cash, carried ->
+            val today = LocalDate.now(ZoneId.systemDefault())
+            val first = window.start.toEpochDay()
+            val daysElapsed = (today.toEpochDay() - first + 1).toInt()
+            // The series always covers the whole period, so the bars keep the same
+            // width all month and the days still to come show as empty.
+            val daysInPeriod = window.fiscal.lengthOf(window.start)
+            // Keyed by days since the period started, not by day of month, because a
+            // period that starts on the 28th crosses into the next calendar month.
+            val spentByOffset = e.daily.associate {
+                (LocalDate.parse(it.day).toEpochDay() - first).toInt() to it.spentMinor
+            }
+            OverviewState(
+                loaded = true,
+                hasAnyTransaction = e.totalCount > 0,
+                spentMinor = c.spent,
+                receivedMinor = c.received,
+                lastMonthSpentMinor = e.lastSpent,
+                avgDailyMinor = c.spent / daysElapsed.coerceAtLeast(1),
+                reviewCount = e.reviewCount,
+                dailySpendSeries = (0 until daysInPeriod).map { spentByOffset[it] ?: 0L },
+                elapsedDays = daysElapsed,
+                topCategories = c.top,
+                largestExpenses = e.largest,
+                recent = c.recent,
+                budgets = budgets,
+                cashMinor = cash,
+                periodLabel = window.label,
+                carriedMinor = carried,
+            )
+        }
     }
         .debounce(DASHBOARD_SETTLE_MS)
         .flowOn(Dispatchers.Default)
+        // The dashboard is the start screen. If a query fails, show what we can
+        // instead of crashing, so History and Data stay reachable.
+        .catch { emit(OverviewState(loaded = true, hasAnyTransaction = true, loadFailed = true)) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), OverviewState())
 
     private companion object {
@@ -171,28 +229,50 @@ class OverviewViewModel @Inject constructor(repo: LedgerRepository) : ViewModel(
     }
 }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class ReviewViewModel @Inject constructor(
     private val repo: LedgerRepository,
+    private val period: PeriodPrefs,
 ) : ViewModel() {
 
+    /** How many queued rows are older than the current month. */
+    val olderCount: StateFlow<Int> =
+        period.current().flatMapLatest { window -> repo.observeReviewCountBefore(window.bounds.first) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    /** @param olderOnly true clears only rows before this month; false, everything. */
+    fun clearQueue(olderOnly: Boolean) = viewModelScope.launch {
+        val before = if (olderOnly) {
+            val fiscal = period.fiscal()
+            fiscal.bounds(fiscal.startOf(LocalDate.now(ZoneId.systemDefault()))).first
+        } else null
+        val n = repo.clearReview(before)
+        _cleared.value = "Cleared $n from the queue · they stay in History"
+    }
+
+    /** Separate from [message], which the setup guide reads as "a rule was made". */
+    private val _cleared = MutableStateFlow<String?>(null)
+    val cleared: StateFlow<String?> = _cleared.asStateFlow()
+    fun clearClearedMessage() { _cleared.value = null }
+
     /**
-     * The review backlog. Null until the first read lands — "empty" and "not
-     * loaded yet" are genuinely different states, and conflating them is what
-     * flashed "All caught up" over a queue that was about to arrive.
+     * The review queue. Null until the first read arrives, so the screen can tell
+     * "not loaded yet" apart from "empty" and doesn't flash "All caught up".
      */
     val queue: StateFlow<List<TransactionEntity>?> =
         repo.observeReviewQueue()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    /** Enabled categories offered as quick taps, split by direction so a credit
-     *  is never offered "Rent". Falls back to the defaults until the first-run
-     *  seed lands. */
+    /**
+     * Enabled categories for the quick-pick chips, split by direction so money
+     * coming in is never offered "Rent". Uses the defaults until the seed runs.
+     */
     val categories: StateFlow<CategoryOptions> =
         repo.observeCategoryOptions()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CategoryOptions())
 
-    /** Transient confirmation of a retroactive rule sweep ("Also sorted N…"). */
+    /** A short confirmation after a rule sorts other queued rows ("Also sorted N"). */
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
     fun clearMessage() { _message.value = null }
@@ -210,12 +290,17 @@ class ReviewViewModel @Inject constructor(
                 "Rule created · also sorted ${result.alsoCleared} more from this sender"
         }
     }
+
+    fun moveToCash(entity: TransactionEntity) = viewModelScope.launch { repo.moveToCash(entity) }
+    fun keepOutOfCash(entity: TransactionEntity) = viewModelScope.launch { repo.keepOutOfCash(entity) }
 }
 
 enum class SortOrder(val label: String) { NEWEST("Newest"), OLDEST("Oldest"), LARGEST("Largest") }
 
-/** History date window. Defaults to a recent slice so the list never loads the
- *  whole ledger up front; [CUSTOM] is driven by the calendar range picker. */
+/**
+ * The History date window. The default is a recent slice, so the list never
+ * loads the whole ledger at once. [CUSTOM] comes from the date range picker.
+ */
 enum class DatePreset(val label: String) {
     THIS_MONTH("This month"),
     LAST_90_DAYS("Last 90 days"),
@@ -229,48 +314,52 @@ data class SenderOption(val institution: String, val label: String)
 
 data class HistoryFilters(
     val query: String = "",
-    val direction: String? = null,   // "DEBIT" / "CREDIT" / null
+    val direction: String? = null,  // "DEBIT", "CREDIT", or null for both
     val category: String? = null,
-    val institution: String? = null, // Institution.name / null
+    val institution: String? = null,  // Institution.name, or null for all
     val reviewOnly: Boolean = false,
     val sort: SortOrder = SortOrder.NEWEST,
     val datePreset: DatePreset = DatePreset.LAST_90_DAYS,
-    val customFrom: Long? = null,    // epoch millis, inclusive (CUSTOM only)
-    val customTo: Long? = null,      // epoch millis, inclusive (CUSTOM only)
+    val customFrom: Long? = null,  // epoch millis, inclusive (CUSTOM only)
+    val customTo: Long? = null,  // epoch millis, inclusive (CUSTOM only)
 ) {
     val anyActive: Boolean
         get() = direction != null || category != null || institution != null ||
             reviewOnly || datePreset != DatePreset.LAST_90_DAYS || sort != SortOrder.NEWEST
 
-    /** How many narrowing choices sit behind the filter button — the date window
-     *  and the search box stay on the screen itself, so they don't count. Drives
-     *  the button's badge and the summary row of removable chips. */
+    /**
+     * How many filters are set behind the filter button, for its badge. The date
+     * window and the search box are on the screen itself, so they don't count.
+     */
     val activeCount: Int
         get() = listOf(direction != null, category != null, institution != null, reviewOnly)
             .count { it } + if (sort != SortOrder.NEWEST) 1 else 0
 
-    /** Resolved [from, to] epoch-milli bounds for the current window; either may
-     *  be null (open-ended). ALL_TIME is fully open. */
-    val bounds: Pair<Long?, Long?>
-        get() {
-            val zone = ZoneId.systemDefault()
-            val today = LocalDate.now(zone)
-            fun startOf(d: LocalDate) = d.atStartOfDay(zone).toInstant().toEpochMilli()
-            fun endOf(d: LocalDate) = d.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
-            return when (datePreset) {
-                DatePreset.THIS_MONTH -> startOf(today.withDayOfMonth(1)) to endOf(today)
-                DatePreset.LAST_90_DAYS -> startOf(today.minusDays(89)) to endOf(today)
-                DatePreset.THIS_YEAR -> startOf(today.withDayOfYear(1)) to endOf(today)
-                DatePreset.ALL_TIME -> null to null
-                DatePreset.CUSTOM -> customFrom to customTo
-            }
+    /**
+     * The start and end of the current window in epoch millis. Either can be null,
+     * meaning no limit on that side. "This month" means the user's month, which
+     * may start on a day other than the 1st.
+     */
+    fun bounds(fiscal: FiscalMonth): Pair<Long?, Long?> {
+        val zone = ZoneId.systemDefault()
+        val today = LocalDate.now(zone)
+        fun startOf(d: LocalDate) = d.atStartOfDay(zone).toInstant().toEpochMilli()
+        fun endOf(d: LocalDate) = d.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
+        return when (datePreset) {
+            DatePreset.THIS_MONTH -> startOf(fiscal.startOf(today)) to endOf(today)
+            DatePreset.LAST_90_DAYS -> startOf(today.minusDays(89)) to endOf(today)
+            DatePreset.THIS_YEAR -> startOf(today.withDayOfYear(1)) to endOf(today)
+            DatePreset.ALL_TIME -> null to null
+            DatePreset.CUSTOM -> customFrom to customTo
         }
+    }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class HistoryViewModel @Inject constructor(
     private val repo: LedgerRepository,
+    private val period: PeriodPrefs,
 ) : ViewModel() {
     private val _filters = MutableStateFlow(HistoryFilters())
     val filters: StateFlow<HistoryFilters> = _filters.asStateFlow()
@@ -279,30 +368,33 @@ class HistoryViewModel @Inject constructor(
         repo.observeCategoryOptions()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CategoryOptions())
 
-    /** Senders present in the ledger, mapped to friendly labels for the chips. */
+    /** Providers in the ledger, with readable labels for the filter chips. */
     val senders: StateFlow<List<SenderOption>> =
         repo.observeInstitutions()
             .map { names -> names.map { SenderOption(it, institutionLabel(it)) } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // All filtering + sorting happens in SQL (off the main thread); the window
-    // bounds cap how much is ever read, so the list stays fast as data grows.
-    // Null until the first result set lands, so the screen shows a wireframe
-    // rather than briefly claiming there are no transactions.
+    // Filtering and sorting run in SQL, off the main thread, and the date window
+    // limits how much is read. Null until the first result arrives, so the screen
+    // shows a placeholder instead of briefly saying there are no transactions.
     val results: StateFlow<List<TransactionEntity>?> =
-        _filters.flatMapLatest { f ->
-            val (from, to) = f.bounds
-            repo.filterHistory(
-                query = f.query.trim(),
-                direction = f.direction,
-                category = f.category,
-                institution = f.institution,
-                reviewOnly = f.reviewOnly,
-                from = from,
-                to = to,
-                sort = f.sort.name,
-            )
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+        combine(_filters, period.startDay) { f, day -> f to FiscalMonth(day) }
+            // Wait for typing to pause before searching. Filter chips apply at once,
+            // since there is no typing to wait for.
+            .debounce { (f, _) -> if (f.query.isBlank()) 0L else SEARCH_SETTLE_MS }
+            .flatMapLatest { (f, fiscal) ->
+                val (from, to) = f.bounds(fiscal)
+                repo.filterHistory(
+                    query = f.query.trim(),
+                    direction = f.direction,
+                    category = f.category,
+                    institution = f.institution,
+                    reviewOnly = f.reviewOnly,
+                    from = from,
+                    to = to,
+                    sort = f.sort.name,
+                )
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     fun onQueryChange(value: String) { _filters.value = _filters.value.copy(query = value) }
     fun toggleDirection(dir: String) {
@@ -365,24 +457,39 @@ class HistoryViewModel @Inject constructor(
         if (ids.isNotEmpty()) repo.setCategoryFor(ids, category)
         _selection.value = emptySet()
     }
+
+    private companion object {
+        /** Long enough to wait out a word being typed, short enough to feel responsive. */
+        const val SEARCH_SETTLE_MS = 220L
+    }
 }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class DetailViewModel @Inject constructor(
     private val repo: LedgerRepository,
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
-    private val id: Long = savedStateHandle.get<String>("id")?.toLongOrNull() ?: -1L
+    /**
+     * The full screen reads the id from its route. The sheet has no route
+     * argument, so it sets the id with [bind].
+     */
+    private val id = MutableStateFlow(savedStateHandle.get<String>("id")?.toLongOrNull() ?: -1L)
+
+    fun bind(transactionId: Long) { id.value = transactionId }
 
     val transaction: StateFlow<TransactionEntity?> =
-        repo.observeTransaction(id)
+        id.flatMapLatest { repo.observeTransaction(it) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     val categories: StateFlow<CategoryOptions> =
         repo.observeCategoryOptions()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CategoryOptions())
 
-    fun setCategory(category: String) = edit { it.copy(category = category, needsReview = false) }
+    /** Filing a transaction also answers an open cash question with "no". */
+    fun setCategory(category: String) = edit {
+        it.copy(category = category, needsReview = false, cashMove = it.cashMove.answeredNo())
+    }
     fun setPerson(person: String?) = edit { it.copy(person = person?.trim()?.ifBlank { null }) }
     fun setNote(note: String?) = edit { it.copy(notes = note?.trim()?.ifBlank { null }) }
 
@@ -391,23 +498,80 @@ class DetailViewModel @Inject constructor(
     }
 
     fun delete(onDone: () -> Unit) = viewModelScope.launch {
-        repo.deleteTransaction(id)
+        repo.deleteTransaction(id.value)
         onDone()
+    }
+
+    fun moveToCash() = viewModelScope.launch { transaction.value?.let { repo.moveToCash(it) } }
+    fun keepOutOfCash() = viewModelScope.launch { transaction.value?.let { repo.keepOutOfCash(it) } }
+    fun undoMoveToCash() = viewModelScope.launch { transaction.value?.let { repo.undoMoveToCash(it) } }
+}
+
+/** The day the user's month starts on (Settings). */
+@HiltViewModel
+class PeriodViewModel @Inject constructor(private val period: PeriodPrefs) : ViewModel() {
+    val startDay: StateFlow<Int> = period.startDay
+    val carryOver: StateFlow<Boolean> = period.carryOver
+    fun setStartDay(day: Int) = period.setStartDay(day)
+    fun setCarryOver(on: Boolean) = period.setCarryOver(on)
+}
+
+data class CashState(
+    val loaded: Boolean = false,
+    val balanceMinor: Long = 0,
+    val entries: List<TransactionEntity> = emptyList(),
+)
+
+/** The cash ledger and its hand-entry form. */
+@HiltViewModel
+class CashViewModel @Inject constructor(
+    private val repo: LedgerRepository,
+    private val budgetAlerter: BudgetAlerter,
+) : ViewModel() {
+
+    val state: StateFlow<CashState> =
+        combine(repo.observeCashBalance(), repo.observeCash()) { balance, entries ->
+            CashState(loaded = true, balanceMinor = balance, entries = entries)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CashState())
+
+    val categories: StateFlow<CategoryOptions> =
+        repo.observeCategoryOptions()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CategoryOptions())
+
+    fun setOnHand(targetMinor: Long, onSaved: () -> Unit) = viewModelScope.launch {
+        repo.setCashOnHand(targetMinor)
+        onSaved()
+    }
+
+    fun add(
+        direction: String,
+        amountMinor: Long,
+        category: String?,
+        description: String,
+        note: String,
+        occurredAt: Long,
+        onSaved: () -> Unit,
+        /**
+         * Cash the user already had, recorded first so this spend doesn't take the
+         * balance below zero (see [com.ledger.app.data.db.CashMove.OPENING]).
+         */
+        topUpMinor: Long = 0,
+    ) = viewModelScope.launch {
+        if (amountMinor <= 0) return@launch
+        if (topUpMinor > 0) repo.adjustCash(topUpMinor)
+        repo.addCashEntry(Direction.valueOf(direction), amountMinor, category, description, note, occurredAt)
+        // Cash spending counts against budgets like any other.
+        if (direction == Direction.DEBIT.name) budgetAlerter.checkAndNotify()
+        // Call this last. Closing the screen clears this ViewModel and cancels its
+        // scope, which would stop the budget check above if it ran first.
+        onSaved()
     }
 }
 
-@HiltViewModel
-class SettingsViewModel @Inject constructor(
-    repo: LedgerRepository,
-) : ViewModel() {
-    val senders = repo.observeSenders()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-}
-
 /**
- * The first-run guide's state, shared by every screen that owns a beat. Each
- * screen gets its own instance, but they all read and write the singleton
- * [TutorialManager], so only one coach-mark is ever live.
+ * The setup guide's state, used by every screen that has a step. Each screen
+ * gets its own instance, but they all share the one [TutorialManager], so only
+ * one step shows at a time.
  */
 @HiltViewModel
 class TutorialViewModel @Inject constructor(
@@ -416,11 +580,11 @@ class TutorialViewModel @Inject constructor(
 
     val state: StateFlow<TutorialState> = tutorial.state
 
-    /** The screen the guide wants next; the host navigates and acknowledges. */
+    /** The screen the guide wants next. The host navigates there and acknowledges. */
     val navigateTo: StateFlow<TutorialStep?> = tutorial.navigateTo
     fun navigationHandled() = tutorial.navigationHandled()
 
-    /** Called once from the host, on a genuine first launch. */
+    /** Called by the host on launch; see [TutorialManager.startIfFirstRun]. */
     fun startIfFirstRun() = tutorial.startIfFirstRun()
 
     fun complete(step: TutorialStep) = tutorial.complete(step)
@@ -434,9 +598,11 @@ data class OwnAccountRow(
     val account: OwnAccountEntity,
     val names: List<String>,
 ) {
-    /** "MTN MoMo · known as AMA OWUSU" — the two facts that explain why a
-     *  transfer was, or wasn't, recognised as the user's own money. Null when the
-     *  user didn't say which wallet, which is allowed and changes no matching. */
+    /**
+     * The wallet and the name providers print for it, such as "MTN MoMo · known as
+     * AMA OWUSU". Together they explain why a transfer was or wasn't recognised as
+     * the user's own. Null when the user didn't say which wallet.
+     */
     val senderLabel: String?
         get() = account.institution
             .takeIf { it != OwnAccountEntity.ANY_PROVIDER }
@@ -444,9 +610,9 @@ data class OwnAccountRow(
 }
 
 /**
- * The user's own numbers/accounts. Naming them is what lets the app tell
- * "I moved my own money" apart from "I paid someone", so an internal transfer
- * stops counting as spending.
+ * The user's own wallets. Knowing them lets the app tell "I moved my own
+ * money" apart from "I paid someone", so a transfer between them doesn't count
+ * as spending.
  */
 @HiltViewModel
 class OwnAccountsViewModel @Inject constructor(
@@ -470,8 +636,8 @@ class OwnAccountsViewModel @Inject constructor(
     fun clearError() { _error.value = null }
 
     /**
-     * @param institution [com.ledger.domain.model.Institution] name, or null for
-     *  "any" — which wallet the number belongs to.
+     * @param institution which wallet the number belongs to, as an
+     *  [com.ledger.domain.model.Institution] name, or null for any.
      * @param names comma-separated names providers show for this account.
      */
     fun add(
@@ -500,9 +666,9 @@ data class SecurityState(
 }
 
 /**
- * Settings-side controls for the opt-in app lock. [AppLockManager] writes to
- * SharedPreferences synchronously, so state is re-read after each change rather
- * than observed — the card is the only writer.
+ * Settings controls for the optional app lock. [AppLockManager] writes
+ * synchronously and this card is its only writer, so the state is simply read
+ * again after each change.
  */
 @HiltViewModel
 class SecurityViewModel @Inject constructor(
@@ -562,22 +728,37 @@ class CategoriesViewModel @Inject constructor(
     fun add(name: String, kind: CategoryKind) =
         viewModelScope.launch { repo.addCategory(name, kind) }
 
+    /** How many categories the last "restore defaults" added, for the screen to report. */
+    private val _restored = MutableStateFlow<Int?>(null)
+    val restored: StateFlow<Int?> = _restored.asStateFlow()
+
+    fun restoreDefaults() = viewModelScope.launch { _restored.value = repo.restoreDefaultCategories() }
+
     fun rename(category: CategoryEntity, name: String) = viewModelScope.launch {
         val clean = name.trim()
         if (clean.isNotEmpty()) repo.saveCategory(category.copy(name = clean))
     }
     fun setEnabled(category: CategoryEntity, enabled: Boolean) =
-        viewModelScope.launch { repo.saveCategory(category.copy(enabled = enabled)) }
+        viewModelScope.launch {
+            // A hidden category can't stay a favourite.
+            repo.saveCategory(
+                category.copy(enabled = enabled, favorite = category.favorite && enabled),
+            )
+        }
+
+    /** Adds or removes a category from the inline row the pickers offer. */
+    fun setFavorite(category: CategoryEntity, favorite: Boolean) =
+        viewModelScope.launch { repo.setCategoryFavorite(category, favorite) }
     fun setKind(category: CategoryEntity, kind: CategoryKind) =
         viewModelScope.launch { repo.setCategoryKind(category, kind) }
     fun delete(category: CategoryEntity) = viewModelScope.launch { repo.deleteCategory(category.id) }
 
     /**
-     * Moves a category one slot up (-1) or down (+1).
+     * Moves a category one place up (-1) or down (+1).
      *
-     * Swaps with the nearest neighbour *of the same kind*, because the editor
-     * groups by side: swapping with the raw list neighbour would make a category
-     * hop out of its own section and appear not to move at all.
+     * The editor groups categories by side, so this swaps with the nearest
+     * neighbour on the same side. Swapping with the next row in the raw list could
+     * move it into another section.
      */
     fun move(category: CategoryEntity, delta: Int) = viewModelScope.launch {
         val peers = categories.value.filter { it.kind == category.kind }
@@ -587,38 +768,38 @@ class CategoriesViewModel @Inject constructor(
     }
 
     /**
-     * Commits a drag-and-drop reorder. [ids] is the whole list in its new order.
-     *
-     * The screen reorders its own copy as the row is dragged and calls this once
-     * on drop, so the list follows the finger at frame rate without a database
-     * round-trip per row crossed.
+     * Saves a drag-and-drop reorder. [ids] is the whole list in its new order.
+     * The screen reorders its own copy while dragging and calls this once on drop.
      */
     fun reorder(ids: List<Long>) = viewModelScope.launch { repo.reorderCategories(ids) }
 }
 
 /**
- * The full category breakdown behind the dashboard's top five.
- *
- * Owns the month being viewed, so the screen can be stepped back through history
- * rather than being a fixed snapshot of the current month — the question "where
- * did it go?" is usually asked about a month that has already closed.
+ * The full category breakdown behind the dashboard's top five. The user can
+ * step back through earlier months, or pick a date range.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class BreakdownViewModel @Inject constructor(
     private val repo: LedgerRepository,
+    private val periodPrefs: PeriodPrefs,
 ) : ViewModel() {
 
-    private val _period = MutableStateFlow<BreakdownPeriod>(
-        BreakdownPeriod.Month(LocalDate.now(ZoneId.systemDefault()).withDayOfMonth(1)),
-    )
+    private fun currentMonth(): BreakdownPeriod.Month {
+        val fiscal = periodPrefs.fiscal()
+        return BreakdownPeriod.Month(fiscal.startOf(LocalDate.now(ZoneId.systemDefault())), fiscal.startDay)
+    }
+
+    private val _period = MutableStateFlow<BreakdownPeriod>(currentMonth())
     val period: StateFlow<BreakdownPeriod> = _period.asStateFlow()
 
     private val _direction = MutableStateFlow("DEBIT")
     val direction: StateFlow<String> = _direction.asStateFlow()
 
-    /** Null until the first read lands, so the screen shows a wireframe rather
-     *  than briefly claiming the period was empty. */
+    /**
+     * Null until the first read arrives, so the screen shows a placeholder instead
+     * of briefly saying the period was empty.
+     */
     val slices: StateFlow<List<CategorySlice>?> =
         combine(_period, _direction) { period, direction -> period to direction }
             .flatMapLatest { (period, direction) ->
@@ -629,28 +810,27 @@ class BreakdownViewModel @Inject constructor(
 
     fun setDirection(value: String) { _direction.value = value }
 
-    /** Steps a whole month at a time; never past the current month, since there
-     *  is nothing to show in the future. A no-op on an explicit range, which has
-     *  no next one to step to. */
+    /**
+     * Steps one month at a time, never past the current month. Does nothing while
+     * a custom range is showing.
+     */
     fun stepMonth(delta: Long) {
-        val current = (_period.value as? BreakdownPeriod.Month)?.first ?: return
-        val next = current.plusMonths(delta)
-        val thisMonth = LocalDate.now(ZoneId.systemDefault()).withDayOfMonth(1)
-        if (!next.isAfter(thisMonth)) _period.value = BreakdownPeriod.Month(next)
+        val current = _period.value as? BreakdownPeriod.Month ?: return
+        val next = FiscalMonth(current.startDay).shift(current.first, delta)
+        if (!next.isAfter(currentMonth().first)) _period.value = current.copy(first = next)
     }
 
     fun canStepForward(): Boolean {
         val current = (_period.value as? BreakdownPeriod.Month)?.first ?: return false
-        return current.isBefore(LocalDate.now(ZoneId.systemDefault()).withDayOfMonth(1))
+        return current.isBefore(currentMonth().first)
     }
 
     /**
-     * Widens the breakdown to an explicit window.
+     * Shows the breakdown for a custom date range.
      *
-     * The endpoints are snapped out to whole days — start of the first, last
-     * millisecond of the last — the same normalisation [HistoryViewModel.setCustomRange]
-     * does, so a range picked in one screen covers the same transactions in the
-     * other rather than silently dropping the final day.
+     * The range is widened to whole days, the same way
+     * [HistoryViewModel.setCustomRange] does it, so the same range covers the same
+     * transactions on both screens.
      */
     fun setRange(fromMillis: Long, toMillis: Long) {
         val zone = ZoneId.systemDefault()
@@ -663,26 +843,26 @@ class BreakdownViewModel @Inject constructor(
 
     /** Back to the steppable month view, at the current month. */
     fun clearRange() {
-        _period.value = BreakdownPeriod.Month(LocalDate.now(ZoneId.systemDefault()).withDayOfMonth(1))
+        _period.value = currentMonth()
     }
 }
 
 /**
- * The window a breakdown covers.
- *
- * A month is kept as its own case rather than collapsed into a pair of millis
- * because it is the only one that can be stepped, and the label differs — "July
- * 2026" reads better than the two dates that bound it.
+ * The window a breakdown covers. A month is its own case because only a month
+ * can be stepped, and it gets a month label instead of two dates.
  */
 sealed interface BreakdownPeriod {
-    /** [first] is the first day of the month. */
-    data class Month(val first: LocalDate) : BreakdownPeriod
+    /**
+     * [first] is the first day of the user's month. The month starts on [startDay],
+     * except in a month too short for it, where it starts on the last day.
+     */
+    data class Month(val first: LocalDate, val startDay: Int = 1) : BreakdownPeriod
     /** Inclusive epoch-milli bounds, already snapped to whole days. */
     data class Range(val fromMillis: Long, val toMillis: Long) : BreakdownPeriod
 }
 
 private fun BreakdownPeriod.bounds(): Pair<Long, Long> = when (this) {
-    is BreakdownPeriod.Month -> monthBounds(first)
+    is BreakdownPeriod.Month -> FiscalMonth(startDay).bounds(first)
     is BreakdownPeriod.Range -> fromMillis to toMillis
 }
 
@@ -698,26 +878,28 @@ class DataViewModel @Inject constructor(
     fun clearStatus() { _status.value = null }
 
     /**
-     * True while the SMS backfill is scanning, so the import row can show an
-     * inline spinner. Deliberately *not* a blocking modal: the scan is
-     * idempotent and safe to leave running, so trapping the user behind a
-     * dialog they were told not to close bought nothing.
+     * True while the inbox import is running, so the import row can show a
+     * spinner. It doesn't block the screen: the import is safe to leave running.
      */
     private val _importing = MutableStateFlow(false)
     val importing: StateFlow<Boolean> = _importing.asStateFlow()
 
-    /** Bumped when a scan finishes. Lets the setup guide's import beat complete
-     *  without this ViewModel knowing the guide exists. */
+    /**
+     * Goes up by one each time an import finishes. The setup guide watches it to
+     * complete its import step.
+     */
     private val _importsFinished = MutableStateFlow(0)
     val importsFinished: StateFlow<Int> = _importsFinished.asStateFlow()
 
-    /** Routes the READ_SMS permission result: import on grant, explain on denial. */
+    /** Handles the READ_SMS permission result: import if granted, explain if not. */
     fun onSmsPermissionResult(granted: Boolean) {
         if (granted) importSms() else _status.value = "SMS permission is needed to import past messages."
     }
 
-    /** Backfills past transactions from the SMS inbox (requires READ_SMS granted).
-     *  Runs in the background; the result lands in [status]. */
+    /**
+     * Imports past transactions from the SMS inbox. Needs READ_SMS. Runs in the
+     * background, and the result appears in [status].
+     */
     fun importSms() {
         if (_importing.value) return
         viewModelScope.launch {
@@ -757,22 +939,27 @@ class DataViewModel @Inject constructor(
     }
 
     /**
-     * Imports a `.ledger` (encrypted) or `.json` (plain) file. [replace] wipes
-     * existing data first (a full restore); otherwise it merges by dedup key.
+     * Imports a `.ledger` (encrypted) or `.json` (plain) file.
+     *
+     * This always merges. Transactions the device already has are skipped, and
+     * nothing captured since the file was made is touched. [restoring] only
+     * changes the wording of the result.
      */
-    fun importFrom(uri: Uri, passphrase: String?, replace: Boolean) = viewModelScope.launch {
+    fun importFrom(uri: Uri, passphrase: String?, restoring: Boolean = false) = viewModelScope.launch {
         runCatching {
             val raw = readText(uri)
             val jsonText = if (BackupCrypto.looksLikeBackup(raw)) {
-                val pass = passphrase?.takeIf { it.isNotEmpty() } ?: error("This backup is encrypted — enter its passphrase.")
+                val pass = passphrase?.takeIf { it.isNotEmpty() } ?: error("This backup is encrypted. Enter its passphrase.")
                 BackupCrypto.decrypt(raw, pass.toCharArray())
             } else {
                 raw
             }
-            repo.importBackup(LedgerTransfer.fromJson(jsonText), replace)
+            repo.importBackup(LedgerTransfer.fromJson(jsonText))
         }.onSuccess { r ->
-            val verb = if (replace) "Restored" else "Imported"
-            _status.value = "$verb ${r.added} · skipped ${r.skipped} duplicate${if (r.skipped == 1) "" else "s"}"
+            val verb = if (restoring) "Restored" else "Imported"
+            // Skipped rows are ones the device already had, so say "already here"
+            // rather than "duplicates".
+            _status.value = "$verb ${r.added} · ${r.skipped} already here"
         }.onFailure {
             _status.value = when (it) {
                 is BackupCrypto.WrongPassphraseException -> it.message ?: "Wrong passphrase."
@@ -791,38 +978,14 @@ class DataViewModel @Inject constructor(
             ?: error("Couldn't read the selected file.")
 }
 
-@HiltViewModel
-class OnboardingViewModel @Inject constructor(
-    private val repo: LedgerRepository,
-    private val setup: SetupPrefs,
-) : ViewModel() {
-    val sample = MutableStateFlow("")
-    val detection = MutableStateFlow<LedgerRepository.Detection?>(null)
-
-    fun onSampleChange(v: String) { sample.value = v }
-
-    fun detect() { detection.value = repo.detectSample(sample.value) }
-
-    /**
-     * @param onDone receives true when the category shortlist still has to be
-     *   offered. It is asked here, at the end of adding a sender, because that is
-     *   the moment the app first has something to sort — and only once, so adding
-     *   a second sender later goes straight back where it came from.
-     */
-    fun enableAndFinish(onDone: (pickCategories: Boolean) -> Unit) = viewModelScope.launch {
-        detection.value?.institution?.let { repo.enableSender(it) }
-        onDone(!setup.categoriesChosen)
-    }
-}
-
 /**
- * The setup shortlist: which categories this user actually wants offered.
+ * The setup shortlist: the categories this user reaches for most.
  *
- * The full default set is thirty labels, and a picker showing all of them is
- * mostly labels this particular user will never reach for. Rather than make them
- * prune it later — in an editor they have to find first — the choice is offered
- * once, up front, pre-answered with a sensible shortlist so it can be dismissed
- * with a single tap.
+ * There are about thirty default categories, more than a picker should show at
+ * once. The user picks a shortlist up front, with sensible ones already ticked.
+ *
+ * The shortlist only decides what the pickers show first. Every other
+ * category is still available behind "More".
  */
 @HiltViewModel
 class CategorySetupViewModel @Inject constructor(
@@ -830,8 +993,7 @@ class CategorySetupViewModel @Inject constructor(
     private val setup: SetupPrefs,
 ) : ViewModel() {
 
-    /** Every label that exists, so the screen offers the user's own additions
-     *  alongside the seeded ones when this is reopened from the editor. */
+    /** Every category, including ones the user added, for when this is reopened. */
     val categories: StateFlow<List<CategoryEntity>> =
         repo.observeCategories()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -840,15 +1002,12 @@ class CategorySetupViewModel @Inject constructor(
     val selected: StateFlow<Set<String>> = _selected.asStateFlow()
 
     init {
-        // The first read that lands, and only that one: a later emission is the
-        // table changing under us, and re-seeding from it would wipe out the taps
-        // the user has made since.
+        // Use only the first read. Later updates would overwrite the user's taps.
         viewModelScope.launch {
             val rows = categories.first { it.isNotEmpty() }
             _selected.value =
-                // Reopened after the first pass — show what they chose last time,
-                // not the generic suggestion.
-                if (setup.categoriesChosen) rows.filter { it.enabled }.map { it.name }.toSet()
+                // Reopened later: show what they chose last time.
+                if (setup.categoriesChosen) rows.filter { it.favorite }.map { it.name }.toSet()
                 else rows.map { it.name }.filterTo(mutableSetOf()) { it in DefaultCategories.SUGGESTED }
         }
     }
@@ -860,15 +1019,74 @@ class CategorySetupViewModel @Inject constructor(
     fun selectAll(names: List<String>) { _selected.value = names.toSet() }
 
     fun save(onDone: () -> Unit) = viewModelScope.launch {
-        repo.applyCategoryShortlist(_selected.value)
+        repo.applyCategoryFavourites(_selected.value)
         setup.categoriesChosen = true
         onDone()
     }
 
-    /** Skipping is an answer too — everything stays on, and the step doesn't
-     *  come back to ask again. */
+    /**
+     * Skipping counts as an answer. The pickers use the default order, and the
+     * step isn't offered again.
+     */
     fun skip(onDone: () -> Unit) {
         setup.categoriesChosen = true
         onDone()
     }
+}
+
+/** What the budgets screen renders: the limits, and what is left to budget. */
+data class BudgetsState(
+    val loaded: Boolean = false,
+    val budgets: List<BudgetStatus> = emptyList(),
+    /** Spending categories with no limit yet, offered by "Add a budget". */
+    val available: List<String> = emptyList(),
+) {
+    val totalLimitMinor: Long get() = budgets.sumOf { it.limitMinor }
+    val totalSpentMinor: Long get() = budgets.sumOf { it.spentMinor }
+}
+
+/**
+ * Monthly limits, one per category.
+ *
+ * This screen always shows the current month. Looking back at earlier months
+ * is what the breakdown screen is for. Only spending categories can have a
+ * limit.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+@HiltViewModel
+class BudgetsViewModel @Inject constructor(
+    private val repo: LedgerRepository,
+    period: PeriodPrefs,
+) : ViewModel() {
+
+    /**
+     * Worked out per subscription (see [current]), so the screen and the budget
+     * alerts always describe the same month.
+     */
+    val state: StateFlow<BudgetsState> =
+        period.current().flatMapLatest { window ->
+            val (from, to) = window.bounds
+            combine(
+                repo.observeBudgetStatuses(from, to),
+                repo.observeCategoryOptions(),
+            ) { budgets, options ->
+                val budgeted = budgets.map { it.category }.toSet()
+                BudgetsState(
+                    loaded = true,
+                    budgets = budgets,
+                    available = options.spending.filterNot { it in budgeted },
+                )
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BudgetsState())
+
+    /**
+     * @param limitMajor the amount as typed, in cedis. An amount that rounds to
+     *  zero is ignored, so a typo can't remove an existing budget.
+     */
+    fun setBudget(category: String, limitMajor: Double) = viewModelScope.launch {
+        val minor = (limitMajor * 100).roundToLong()
+        if (minor > 0) repo.setBudget(category, minor)
+    }
+
+    fun remove(category: String) = viewModelScope.launch { repo.removeBudget(category) }
 }

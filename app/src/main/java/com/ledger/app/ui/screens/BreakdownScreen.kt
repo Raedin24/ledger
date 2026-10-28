@@ -45,33 +45,28 @@ import com.ledger.app.ui.components.MONEY_OUT
 import com.ledger.app.ui.components.categoryVisual
 import com.ledger.app.ui.components.customRangeLabel
 import com.ledger.app.ui.components.formatCedis
+import com.ledger.app.data.prefs.label
 import com.ledger.app.ui.theme.LedgerPalette
+import com.ledger.domain.model.FiscalMonth
 import com.ledger.app.ui.theme.LedgerThemeTokens
 import com.ledger.app.ui.vm.BreakdownViewModel
 import com.ledger.app.ui.vm.BreakdownPeriod
-import java.time.LocalDate
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 
-private val monthTitle = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.UK)
 
-/** How many wedges the ring draws before the tail is pooled into one. Past this
- *  the slices are thinner than the gaps between them and read as noise. */
+/**
+ * How many slices the ring draws before grouping the rest into one. Beyond
+ * this, slices get thinner than the gaps between them.
+ */
 private const val RING_SLICES = 8
 
 /**
- * Every category for one period, which is the question the dashboard's top five
- * always provokes: "and the rest?".
+ * Every category for one period: the "and the rest?" behind the dashboard's
+ * top five.
  *
- * The month is steppable because "where did it go?" is usually asked about a
- * month that has already closed, and the direction toggles because the same
- * question applies to income — money in has categories of its own now.
- *
- * A month is only the starting point, though. Plenty of the same question is
- * asked over a quarter, a half-year, or the stretch since a particular event, so
- * the period label opens the range picker and the window widens to whatever was
- * chosen. Stepping is dropped while a range is set: there is no next quarter to
- * step to when the range was arbitrary in the first place.
+ * The user can step back through months, since "where did it go?" is often
+ * asked about a month that has ended, and switch between money out and money
+ * in. Tapping the period label opens a date range picker for longer or
+ * custom periods. Stepping is turned off while a custom range is set.
  */
 @Composable
 fun BreakdownScreen(
@@ -89,8 +84,8 @@ fun BreakdownScreen(
     val total = remember(rows) { rows.sumOf { it.totalMinor } }
     val accent = if (direction == "CREDIT") colors.income else colors.spend
 
-    // The ring's wedges: the leaders as themselves, the tail pooled so a long
-    // list doesn't shred the ring into unreadable slivers.
+    // The ring's slices: the biggest categories on their own, the rest grouped
+    // so a long list doesn't break the ring into slivers.
     val wedges = remember(rows) {
         val head = rows.take(RING_SLICES).map { DonutSlice(it.totalMinor, categoryVisual(it.label).accent) }
         val tail = rows.drop(RING_SLICES).sumOf { it.totalMinor }
@@ -169,25 +164,16 @@ fun BreakdownScreen(
                         style = MaterialTheme.typography.bodyLarge,
                         color = colors.inkSoft,
                     )
-                    Text(
-                        "Own-account transfers are left out — moving your own money " +
-                            "isn't spending in any category.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.inkMuted,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
                 }
             }
         } else {
-            // Largest first, so the share bars descend and the eye can stop early.
+            // Largest first, so the bars get shorter down the list.
             items(rows, key = { it.label }, contentType = { "breakdown-row" }) { slice ->
                 BreakdownRow(slice, total)
             }
             item {
                 Text(
-                    "Own-account transfers are left out — moving your own money isn't " +
-                        "spending in any category. What the provider charged to move it " +
-                        "is counted, under Transaction Fees.",
+                    "Excludes transfers between your own accounts.",
                     style = MaterialTheme.typography.labelSmall,
                     color = colors.inkMuted,
                     modifier = Modifier.padding(start = 2.dp, top = 4.dp),
@@ -209,13 +195,11 @@ fun BreakdownScreen(
 }
 
 /**
- * ‹ July 2026 › — a whole month at a time, never into the future — or the range
- * that replaced it.
+ * The period control: "‹ July 2026 ›", stepping one month at a time and never
+ * into the future, or the custom range that replaced it.
  *
- * The label is the control: tapping it opens the range picker in either mode, so
- * widening the window and adjusting an already-widened one are the same gesture.
- * The arrows disappear on a range because stepping an arbitrary window has no
- * meaning, and a ✕ takes their place to get back to months.
+ * Tapping the label opens the range picker in either case. With a custom
+ * range, the arrows are replaced by a close button that goes back to months.
  */
 @Composable
 private fun PeriodControl(
@@ -235,7 +219,7 @@ private fun PeriodControl(
             if (isMonth) StepArrow("‹", enabled = true) { onStep(-1) }
             Text(
                 text = when (period) {
-                    is BreakdownPeriod.Month -> monthTitle.format(period.first)
+                    is BreakdownPeriod.Month -> FiscalMonth(period.startDay).label(period.first)
                     is BreakdownPeriod.Range ->
                         customRangeLabel(period.fromMillis, period.toMillis).orEmpty()
                 },
@@ -258,7 +242,7 @@ private fun PeriodControl(
         Text(
             text = when {
                 !isMonth -> "Custom range · tap to change"
-                !canStepForward -> "This month, so far · tap the month for a range"
+                !canStepForward -> "This month so far · tap the month for a range"
                 else -> "Tap the month to pick a range"
             },
             style = MaterialTheme.typography.labelSmall,
@@ -290,7 +274,7 @@ private fun StepArrow(symbol: String, enabled: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** One category's line: what it was, how much, what share, over how many rows. */
+/** One category's row: its name, amount, share, and number of transactions. */
 @Composable
 private fun BreakdownRow(slice: CategorySlice, total: Long) {
     val colors = LedgerThemeTokens.colors

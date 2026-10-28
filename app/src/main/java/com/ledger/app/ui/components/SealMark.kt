@@ -5,25 +5,20 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Path
 
 /**
- * The ₵ at the heart of the Ledger seal, as a [Path].
+ * The ₵ in the middle of the Ledger seal, as a [Path].
  *
- * This is the *same geometry* as `res/drawable/ic_launcher_foreground.xml`, and
- * that is the point. The splash previously drew the glyph as `Text("₵")`, which
- * resolves to whatever the platform serif happens to be — so the mark's weight,
- * its slant, and its position inside the ring all changed by device, and the
- * glyph sat visibly off-centre because a text line box reserves descender space
- * the character never uses. Drawing the path centres it by construction: the
- * outline's bounding box is symmetric about the design's (50, 48.6) by
- * definition, so [centre] is exactly the centre.
+ * It uses the same shape as `res/drawable/ic_launcher_foreground.xml`, so the
+ * splash matches the launcher icon. Drawing it as text would depend on the
+ * device's fonts and wouldn't sit centred. The shape is symmetric about the
+ * design's point (50, 48.6), so [centre] is exactly its centre.
  *
- * Authored in the design's 100-unit glyph space; [unit] is one design unit in
- * pixels, so passing `size.minDimension / 100f` puts the ₵ at the same size
- * relative to the ring as the launcher icon does.
+ * The numbers are in the design's 100-unit box. [unit] is one design unit in
+ * pixels, so passing `size.minDimension / 100f` sizes the ₵ against the ring
+ * the same way the launcher icon does.
  *
- * The two sub-paths are wound the same way (both counter-clockwise) while the
- * bowl's counter is wound against them. Under the default non-zero fill that
- * makes the counter a hole and the bowl/stroke overlap solid — the opposite
- * pairing would punch a hole exactly where the stroke crosses the bowl.
+ * The two outer shapes are drawn in the same direction and the bowl's inner
+ * curve in the opposite one. With the default fill rule, that makes the inner
+ * curve a hole while the bowl and the stroke overlap as solid.
  */
 fun cediPath(unit: Float, centre: Offset): Path {
     fun x(v: Float) = centre.x + (v - DESIGN_CX) * unit
@@ -50,6 +45,6 @@ fun cediPath(unit: Float, centre: Offset): Path {
     }
 }
 
-/** The design's glyph-space centre — every number in [cediPath] is relative to it. */
+/** The centre of the design's box. Every number in [cediPath] is relative to it. */
 private const val DESIGN_CX = 50f
 private const val DESIGN_CY = 48.6f

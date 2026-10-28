@@ -1,36 +1,34 @@
 package com.ledger.domain.model
 
 /**
- * Canonical form of a mobile-money number, used to decide whether a
- * transaction's counterparty is one of the user's *own* wallets.
+ * A normalised mobile-money number, used to decide whether a counterparty is
+ * one of the user's own wallets.
  *
- * Providers write the same number many ways — `0244123456`, `+233244123456`,
- * `233 244 123 456`, `024-412-3456` — so matching on the raw string is hopeless.
- * The key is digits-only, reduced to the last [SIGNIFICANT_DIGITS], which makes
- * every Ghanaian national/international spelling of one number collapse to the
- * same value while staying long enough that two unrelated accounts realistically
- * never collide.
+ * Providers write the same number many ways: `0244000111`, `+233244000111`,
+ * `233 244 000 111`, `024-400-0111`. The key keeps only the digits and then
+ * the last [SIGNIFICANT_DIGITS] of them. Every local and international form
+ * of one number gives the same key, and it is still long enough that two
+ * different accounts won't clash.
  *
- * A counterparty that carries no usable digits (a merchant name like "MTN
- * Airtime") has no key and can never be a self-transfer.
+ * A counterparty with no usable digits (a merchant name like "MTN Airtime")
+ * has no key and can never be a self-transfer.
  */
 object AccountKey {
 
-    /** Enough to disambiguate; short enough to absorb country-code prefixes. */
+    /** Enough digits to tell numbers apart, few enough to drop the country code. */
     const val SIGNIFICANT_DIGITS = 9
 
     /** Fewer digits than this isn't an account number (a "5" in "GHS 5.00"). */
     private const val MIN_DIGITS = 6
 
     /**
-     * An account-like run of digits. Internal separators are limited to dashes
-     * (`024-412-3456`) and a leading `+`; spaces are deliberately excluded, or
-     * "GHS 2.38 to 0244123456" would fuse the tail of the amount onto the number
-     * and yield a key for an account that does not exist.
+     * A run of digits that looks like an account number. Dashes (`024-400-0111`)
+     * and a leading `+` are allowed. Spaces are not, or "GHS 2.38 to 0244000111"
+     * would join the end of the amount onto the number.
      */
     private val NUMBER_RUN = Regex("\\+?\\d[\\d-]{4,}\\d")
 
-    /** Canonical key for [raw], or null when it holds no usable account number. */
+    /** The key for [raw], or null when it has no usable account number. */
     fun of(raw: String?): String? {
         val digits = raw?.filter(Char::isDigit).orEmpty()
         if (digits.length < MIN_DIGITS) return null
@@ -38,17 +36,17 @@ object AccountKey {
     }
 
     /**
-     * Canonical keys for every account-like number in [text]. Used on the SMS
-     * narration, where providers hide the counterparty's number when the sender
-     * field carries only a name — Telecel's "Transfer from: 0244123456-AMA",
-     * MTN's trailing "name, number, reference" triple.
+     * Keys for every account-like number in [text]. Used on the SMS narration,
+     * where providers put the other party's number when the sender field only has
+     * a name, such as Telecel's "Transfer from: 0244000111-AMA" or MTN's trailing
+     * "name, number, reference".
      */
     fun allIn(text: String?): List<String> {
         if (text.isNullOrBlank()) return emptyList()
         return NUMBER_RUN.findAll(text).mapNotNull { of(it.value) }.distinct().toList()
     }
 
-    /** True when [counterparty] resolves to one of [ownKeys] (already canonical). */
+    /** True when [counterparty]'s key is one of [ownKeys], which are already keys. */
     fun isOwnAccount(counterparty: String?, ownKeys: Set<String>): Boolean {
         if (ownKeys.isEmpty()) return false
         val key = of(counterparty) ?: return false

@@ -12,64 +12,106 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Supplies the SQLCipher passphrase for the Room database.
+ * Supplies the passphrase that encrypts the Room database (SQLCipher).
  *
- * Design (from the deep security review): "SQLCipher OR Keystore" is actually an
- * AND. SQLCipher needs a passphrase; where that passphrase lives is the real
- * boundary. Here:
+ * The passphrase is only as safe as the place it is kept, so:
  *
  *  1. A random 32-byte passphrase is generated once, on first launch.
- *  2. It is encrypted (AES-256-GCM) with a key that lives in the Android
- *     Keystore (StrongBox-backed when the device supports it) and NEVER leaves
- *     secure hardware.
- *  3. Only the ciphertext + IV are stored, in private SharedPreferences.
+ *  2. It is encrypted with AES-256-GCM using a key held in the Android Keystore.
+ *     That key never leaves the device's secure hardware (StrongBox when the
+ *     device has it).
+ *  3. Only the encrypted passphrase and its IV are stored, in private
+ *     SharedPreferences.
  *
- * The Keystore key is the root of trust, not the SQLCipher layer alone.
- *
- * Deliberate trade-off: this Keystore key is NOT `setUserAuthenticationRequired`.
- * The SMS BroadcastReceiver must be able to open the DB and persist a
- * transaction while the phone is locked / in the background — a biometric-gated
- * DB key would make background capture impossible. The biometric prompt is
- * therefore a separate UI-session lock (see security/BiometricGate), not the DB
- * key gate. This matches the stated threat model: protects data at rest, casual
- * snooping, other apps, and offline extraction — not a live root-compromised OS.
+ * The Keystore key does not require the user to authenticate. The SMS receiver
+ * has to save transactions while the phone is locked, which a key behind a
+ * fingerprint prompt would prevent. The app lock is a separate screen lock
+ * (see security/BiometricGate). This protects data at rest, from other apps and
+ * from offline extraction. It does not protect against a rooted, compromised
+ * phone while it is running.
  */
 class DatabaseKeyProvider(context: Context) {
 
+    private val databaseFile = context.getDatabasePath(com.ledger.app.data.db.LedgerDatabase.NAME)
+
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    /** Returns the raw SQLCipher passphrase bytes, creating it on first use. */
+    /**
+     * The stored passphrase exists but can no longer be decrypted, because the
+     * Keystore key is gone or was invalidated (for example, preferences restored
+     * without the hardware key, or a lock-screen change on some phones).
+     *
+     * This is thrown instead of creating a new key, because a new key can't open
+     * the existing database.
+     */
+    class KeyUnavailableException(cause: Throwable?) : IllegalStateException(
+        "The database key can no longer be unwrapped by this device's keystore. " +
+            "The encrypted ledger cannot be opened; restore from a .ledger backup " +
+            "after clearing the app's data.",
+        cause,
+    )
+
+    /** Returns the SQLCipher passphrase, creating it on first use. */
     fun passphrase(): ByteArray {
         val stored = prefs.getString(KEY_CIPHERTEXT, null)
         val storedIv = prefs.getString(KEY_IV, null)
         return if (stored != null && storedIv != null) {
-            decrypt(Base64.decode(stored, Base64.NO_WRAP), Base64.decode(storedIv, Base64.NO_WRAP))
+            try {
+                decrypt(Base64.decode(stored, Base64.NO_WRAP), Base64.decode(storedIv, Base64.NO_WRAP))
+            } catch (e: KeyUnavailableException) {
+                throw e
+            } catch (e: Exception) {
+                throw KeyUnavailableException(e)
+            }
         } else {
+            // A database file with no stored passphrase means the passphrase was lost.
+            // A new one couldn't open it, so report the loss instead.
+            if (databaseFile.exists()) throw KeyUnavailableException(null)
             val fresh = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
             val (ct, iv) = encrypt(fresh)
-            prefs.edit()
+            // commit, not apply: the database is created with this passphrase as soon
+            // as it is returned, so it must be saved to disk first.
+            val saved = prefs.edit()
                 .putString(KEY_CIPHERTEXT, Base64.encodeToString(ct, Base64.NO_WRAP))
                 .putString(KEY_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
-                .apply()
+                .commit()
+            if (!saved) throw KeyUnavailableException(IllegalStateException("could not save the database key"))
             fresh
         }
     }
 
+    /**
+     * Whether the database can be unlocked on this device. On a first run this
+     * creates the passphrase, just as opening the database would.
+     */
+    fun canUnlock(): Boolean = try {
+        passphrase().fill(0)
+        true
+    } catch (_: KeyUnavailableException) {
+        false
+    }
+
     private fun encrypt(plain: ByteArray): Pair<ByteArray, ByteArray> {
         val cipher = Cipher.getInstance(TRANSFORM)
-        cipher.init(Cipher.ENCRYPT_MODE, keystoreKey())
+        cipher.init(Cipher.ENCRYPT_MODE, keystoreKey(createIfMissing = true))
         return cipher.doFinal(plain) to cipher.iv
     }
 
     private fun decrypt(cipherText: ByteArray, iv: ByteArray): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORM)
-        cipher.init(Cipher.DECRYPT_MODE, keystoreKey(), GCMParameterSpec(128, iv))
+        cipher.init(Cipher.DECRYPT_MODE, keystoreKey(createIfMissing = false), GCMParameterSpec(128, iv))
         return cipher.doFinal(cipherText)
     }
 
-    private fun keystoreKey(): SecretKey {
+    /**
+     * @param createIfMissing true only on first run, when there is no stored
+     *  passphrase yet. Otherwise a missing key is an error, because a new key
+     *  couldn't decrypt the stored passphrase.
+     */
+    private fun keystoreKey(createIfMissing: Boolean): SecretKey {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         (ks.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        if (!createIfMissing) throw KeyUnavailableException(null)
         return generateKey(strongBox = true)
     }
 
@@ -82,16 +124,17 @@ class DatabaseKeyProvider(context: Context) {
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
-            // StrongBox is API 28+; calling the setter on 26/27 would crash before
-            // the fallback catch below could run.
+            // StrongBox needs API 28. Calling the setter on 26 or 27 would crash
+            // before the fallback below could run.
             .apply { if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) setIsStrongBoxBacked(true) }
             .build()
         return try {
             gen.init(spec)
             gen.generateKey()
-        } catch (_: Exception) {
-            // Device without a StrongBox secure element — fall back to TEE-backed.
-            if (strongBox) generateKey(strongBox = false) else throw IllegalStateException("Keystore unavailable")
+        } catch (e: Exception) {
+            // No StrongBox on this device, so fall back to the regular secure
+            // hardware. Keep the cause if that fails too, so the error is useful.
+            if (strongBox) generateKey(strongBox = false) else throw KeyUnavailableException(e)
         }
     }
 

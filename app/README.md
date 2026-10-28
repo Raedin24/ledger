@@ -1,8 +1,9 @@
-# app — Android layer
+# app: the Android layer
 
-The Android application that wraps `:core-domain`. Kotlin, Jetpack Compose
-(Material 3), MVVM + Repository, Hilt, Room + SQLCipher. A warm editorial look —
-the palette lives in `ui/theme/Color.kt`, the type scale in `ui/theme/Type.kt`.
+The Android app built around `:core-domain`. It uses Kotlin, Jetpack Compose
+(Material 3), MVVM with a repository, Hilt for dependency injection, and Room
+with SQLCipher for encrypted storage. The colour palette lives in
+`ui/theme/Color.kt` and the type scale in `ui/theme/Type.kt`.
 
 ## Layout
 
@@ -12,92 +13,96 @@ app/src/main/
 │                              POST_NOTIFICATIONS · INTERNET removed ·
 │                              allowBackup=false
 ├── java/com/ledger/app/
-│   ├── LedgerApp.kt           @HiltAndroidApp · loads SQLCipher libs
-│   ├── MainActivity.kt        FLAG_SECURE · app lock · Compose host
+│   ├── LedgerApp.kt           @HiltAndroidApp, loads the SQLCipher library
+│   ├── MainActivity.kt        FLAG_SECURE, app lock, Compose host
+│   ├── DemoSeed.kt            made-up data for the screenshot build only
 │   ├── sms/
-│   │   ├── SmsReceiver.kt     protected SMS_RECEIVED → repository.ingest()
-│   │   └── SmsInboxImporter   one-time backfill of the existing inbox (READ_SMS)
-│   ├── notifications/         CaptureNotifier — post-capture alert, deep-links a tab
+│   │   ├── SmsReceiver.kt     SMS_RECEIVED → repository.ingest()
+│   │   └── SmsInboxImporter   one-time import of the existing inbox (READ_SMS)
+│   ├── notifications/         capture alerts and budget alerts
 │   ├── data/
-│   │   ├── crypto/            Keystore-wrapped SQLCipher passphrase
-│   │   ├── db/                Room entities, DAOs, database, migrations
-│   │   ├── backup/            LedgerTransfer (JSON/CSV) · BackupCrypto (.ledger)
-│   │   ├── prefs/             SetupPrefs — onboarding / first-run state
-│   │   ├── mapper/            domain ↔ entity
-│   │   └── repository/        the single parse→dedup→categorize→persist seam
-│   ├── di/AppModule.kt        Hilt wiring (domain services + encrypted DB)
+│   │   ├── crypto/            the Keystore-protected SQLCipher passphrase
+│   │   ├── db/                Room entities, DAOs, database and migrations
+│   │   ├── backup/            JSON and CSV export, encrypted .ledger backups
+│   │   ├── budget/            budget levels and when to alert
+│   │   ├── prefs/             first-run state, the month's start day
+│   │   ├── mapper/            domain types ↔ Room entities
+│   │   └── repository/        where every capture is parsed, checked and saved
+│   ├── di/AppModule.kt        Hilt setup (domain services and the database)
 │   ├── security/
-│   │   ├── AppLockManager     PIN state and verification
-│   │   ├── BiometricGate      BiometricPrompt in front of the PIN
-│   │   └── CapturePermission  RECEIVE_SMS / READ_SMS grant checks
-│   ├── tutorial/              first-run coach marks
+│   │   ├── AppLockManager     PIN storage, checking and lockouts
+│   │   ├── BiometricGate      biometric unlock on top of the PIN
+│   │   └── CapturePermission  RECEIVE_SMS and READ_SMS checks
+│   ├── tutorial/              the setup guide's steps and progress
 │   └── ui/
-│       ├── theme/             Ledger palette + type
-│       ├── components/        LedgerCard, rows, cedi formatting, permission banner
-│       ├── vm/                ViewModels.kt — one per screen
-│       ├── screens/           Overview · Review · History · Detail · Breakdown ·
-│       │                      Settings · Data · Categories · CategorySetup ·
-│       │                      Rules · Lock · Splash · OnboardingSender
-│       └── LedgerApp.kt       bottom-nav scaffold (Overview·Review·History·Settings)
-│                              plus detail/{id}, breakdown, rules, categories routes
+│       ├── theme/             palette and type
+│       ├── components/        cards, charts, guide cards, shared widgets
+│       ├── vm/                ViewModels.kt, one ViewModel per screen
+│       ├── screens/           Overview · Review · History · Detail ·
+│       │                      Breakdown · Budgets · Cash · Settings · Data ·
+│       │                      Categories · CategorySetup · Rules · Lock ·
+│       │                      KeyLost · Splash
+│       └── LedgerApp.kt       bottom navigation (Overview, Review, History,
+│                              Settings) and the other routes
 └── res/…                      adaptive icon, cream launch theme, backup rules
 ```
 
-## How capture flows
+## How capture works
 
-`SmsReceiver` (protected `SMS_RECEIVED`) → `LedgerRepository.ingest()` →
-`SmsParser` → `TransactionValidator` (OTP guard) → `DuplicateDetector` →
-`CategorizationEngine` → Room. The raw body never touches disk. A `goAsync()`
-coroutine keeps the receiver alive for the single insert.
+1. `SmsReceiver` receives `SMS_RECEIVED`, which only Android can send.
+2. It passes the message to `LedgerRepository.ingest()`.
+3. The repository runs it through `SmsParser`, then `TransactionValidator`
+   (which keeps OTPs out), `DuplicateDetector` and `CategorizationEngine`, and
+   saves the result with Room.
 
-`SmsInboxImporter` runs the same pipeline over the existing inbox for the
-one-time historical backfill, so imported messages get identical parsing,
-dedup and categorization rather than a second code path.
+The message text is never written to disk. `goAsync()` keeps the receiver
+alive for the short database write.
 
-There is no manual entry: `ingest()` and `importBackup()` are the only ways a
-transaction reaches the database.
+`SmsInboxImporter` runs the same steps over messages already in the inbox, so
+imported messages are parsed, deduplicated and categorised exactly like live
+ones.
 
-## Security posture wired in
+Wallet transactions reach the database only through `ingest()` or by restoring
+a backup (`importBackup()`). Cash is the exception: cash received and spent is
+entered by hand on the Cash screen.
 
-- **No INTERNET permission** — plus `tools:node="remove"` to strip any that a
-  merged library manifest tries to add. Verify the *merged* manifest each release.
-- **`allowBackup="false"` + data-extraction rules** exclude the DB from cloud
-  backup and device-to-device transfer.
-- **SQLCipher** DB; passphrase is 32 random bytes wrapped by an Android Keystore
-  key (StrongBox when available), never stored in plaintext.
-- **FLAG_SECURE** on the activity (no Recents preview, no screenshots) — except
-  in the `screenshot` build type, see below.
-- **BiometricPrompt** app-open lock with device-credential fallback. It is a
-  UI-session gate, intentionally *separate* from the DB key so the background
-  receiver can still write while the phone is locked.
+## Security measures
+
+- **No INTERNET permission.** `tools:node="remove"` also strips it if a library
+  tries to add it. Check the merged manifest before each release.
+- **No backups.** `allowBackup="false"` and the data-extraction rules keep the
+  database out of cloud backup and device-to-device transfer.
+- **Encrypted database.** The SQLCipher passphrase is 32 random bytes,
+  encrypted with an Android Keystore key (StrongBox when available) and never
+  stored in plain text.
+- **FLAG_SECURE** on the activity, so there is no Recents preview and no
+  screenshots. The `screenshot` build type is the only exception (see below).
+- **Optional app lock.** A PIN, with biometric unlock on top. It is a screen
+  lock, separate from the database key, so the SMS receiver can still save
+  alerts while the phone is locked. Wrong PIN guesses lead to growing waits.
 
 ## Build types
 
 | Type | For |
 |---|---|
-| `debug` | Day-to-day development. |
-| `release` | Minified and resource-shrunk, `debuggable=false`, signed. Fails rather than emit an unsigned APK — see [`docs/RELEASING.md`](../docs/RELEASING.md). |
-| `profile` | Frame timings. `release` minus minification, debug-signed so it installs. Never profile the debug build: `debuggable` costs ART most of its optimisation. |
-| `screenshot` | Store/README captures. `debug` with `ALLOW_SCREENSHOTS=true`, which is the only thing that lifts `FLAG_SECURE`. |
+| `debug` | Everyday development. |
+| `release` | Minified and resource-shrunk, `debuggable=false`, signed with the key set in `keystore.properties`. The build fails rather than produce an unsigned APK. |
+| `profile` | Measuring performance. Like `release` but not minified, and signed with the debug key so it installs. Don't profile the debug build, because a debuggable app runs much slower. |
+| `screenshot` | README screenshots. `debug` with `ALLOW_SCREENSHOTS=true`, the only setting that turns off `FLAG_SECURE`. |
 
-`ALLOW_SCREENSHOTS` defaults to `false` in `defaultConfig`, so release — and any
-build type added later — keeps `FLAG_SECURE` without having to remember to ask
-for it.
+`ALLOW_SCREENSHOTS` is `false` in `defaultConfig`, so release, and any build
+type added later, keeps `FLAG_SECURE` without having to ask for it.
 
-The `screenshot` type carries `applicationIdSuffix = ".screenshot"`, so it
-installs as a separate package with its own database and its own Keystore entry.
-Screenshots are taken against seeded demo data; the real ledger is never opened,
-never cleared and never photographed. Uninstall the variant when done.
+The `screenshot` type has `applicationIdSuffix = ".screenshot"`, so it installs
+as a separate app with its own database and Keystore entry. Screenshots use
+made-up demo data, and the real ledger is never opened. Uninstall it when done.
 
-## Still open
+## Not done yet
 
-- **Fonts.** Drop `Newsreader` and `Public Sans` TTFs into `res/font/` and point
-  `ui/theme/Type.kt` at them (currently falls back to system serif/sans to stay
-  offline and buildable).
-- **Battery-optimisation exemption.** Not requested anywhere yet; without it the
-  receiver can be delayed on aggressive OEM builds.
-- **Manual entry.** There is none: `ingest()` and `importBackup()` are the only
-  ways a transaction reaches the database, so cash spent outside mobile money
-  cannot be recorded at all.
-- **Sender toggles.** `enableSender` has no counterpart, so the Live/Paused badge
-  in Settings can only ever read Live once a sender is added.
+- **Fonts.** The design uses Newsreader and Public Sans. To use them, add the
+  TTF files to `res/font/` and point `ui/theme/Type.kt` at them. Until then the
+  app uses the system serif and sans-serif.
+- **Battery optimisation.** The app doesn't ask to be exempted, so on some
+  phones with aggressive battery saving the receiver can be delayed.
+- **Recurring charges.** `RecurringChargeDetector` in `core-domain` works, but
+  no screen uses it yet.

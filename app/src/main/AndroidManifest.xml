@@ -3,31 +3,31 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-      PERMISSIONS — deliberately minimal (see expense-tracker-app-decisions.md).
-      RECEIVE_SMS ONLY: not READ_SMS, not SEND_SMS, not default-SMS-handler.
-      There is intentionally NO android.permission.INTERNET — the app cannot make
-      network calls even if a dependency tried to. Verify this survives manifest
-      merging before every release (check the merged manifest, not just here).
+      Permissions are kept to the minimum. RECEIVE_SMS lets the app see new
+      alerts. It never sends SMS and is not the default SMS app.
+
+      There is no INTERNET permission, so the app can't make network calls even
+      if a library tried to. Check the merged manifest before every release to
+      make sure that is still true.
     -->
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <!--
-      READ_SMS backs the one-time "Import past transactions" action: it reads the
-      existing inbox for trusted senders only, runs each through the same on-device
-      parse pipeline, and never stores raw bodies. Not the default SMS handler.
-      (Play restricts READ_SMS; this build is distributed by sideload.)
+      READ_SMS is for the one-time "Import past transactions" action. It reads
+      messages from supported providers already in the inbox, parses them on the
+      device, and never stores the message text. Google Play restricts READ_SMS,
+      so the app is installed directly from GitHub instead.
     -->
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Explicitly reject any INTERNET permission a merged library might add. -->
+    <!-- Remove any INTERNET permission a library might add. -->
     <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
 
     <!--
-      The SMS permissions above implicitly require telephony hardware, which would
-      hide the app from tablets / Chrome OS. Reading SMS is a bonus, not a hard
-      requirement (the app is still usable for manual review/import), so declare
-      the feature optional.
+      The SMS permissions imply telephony hardware, which would hide the app from
+      tablets and Chrome OS. The app still works without SMS (cash entries, backup
+      import), so telephony is marked optional.
     -->
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
@@ -41,8 +41,8 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Ledger">
 
-        <!-- Launches under the splash theme; installSplashScreen() swaps it for
-             Theme.Ledger via postSplashScreenTheme. -->
+        <!-- Starts with the splash theme. installSplashScreen() switches it to
+             Theme.Ledger through postSplashScreenTheme. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -55,9 +55,9 @@
         </activity>
 
         <!--
-          SMS_RECEIVED is a protected broadcast (only the OS can send it), so no
-          app can forge a fake transaction into the parser. Not exported to any
-          other component. High priority so we see the alert promptly.
+          SMS_RECEIVED is a protected broadcast that only Android can send, and the
+          BROADCAST_SMS permission below means no other app can call this receiver.
+          The high priority makes the app see new alerts promptly.
         -->
         <receiver
             android:name=".sms.SmsReceiver"

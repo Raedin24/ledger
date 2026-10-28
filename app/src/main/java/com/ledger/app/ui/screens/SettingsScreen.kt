@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -42,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ledger.app.tutorial.TutorialStep
+import com.ledger.domain.model.FiscalMonth
 import com.ledger.domain.model.Institution
 import com.ledger.app.ui.components.CoachBeak
 import com.ledger.app.ui.components.CoachMark
@@ -53,32 +55,33 @@ import com.ledger.app.ui.components.coachLabel
 import com.ledger.app.ui.components.spotlight
 import com.ledger.app.ui.theme.LedgerPalette
 import com.ledger.app.ui.theme.LedgerThemeTokens
+import com.ledger.app.data.prefs.ordinal
 import com.ledger.app.ui.vm.OwnAccountsViewModel
+import com.ledger.app.ui.vm.PeriodViewModel
 import com.ledger.app.ui.vm.SecurityViewModel
-import com.ledger.app.ui.vm.SettingsViewModel
 import com.ledger.app.ui.vm.TutorialViewModel
 
 /**
- * Positions of the two cards the setup guide anchors to, so it can scroll them
- * into view. The list below is a fixed sequence of `item {}` blocks — header,
- * senders, my accounts, sorting, security, privacy, data, getting started — so
- * these are stable; keep them in step if a card is inserted.
+ * List positions of the cards the setup guide points at, so it can scroll them
+ * into view. The list below is a fixed sequence of `item {}` blocks: header,
+ * providers, my accounts, sorting, security, budgets, privacy, data, getting
+ * started. Update these if a card is added above any of them.
  */
 private const val ACCOUNTS_CARD = 2
 private const val SECURITY_CARD = 4
+private const val BUDGETS_CARD = 5
 
 @Composable
 fun SettingsScreen(
-    onAddSender: () -> Unit,
     onManageRules: () -> Unit,
     onManageCategories: () -> Unit,
+    onManageBudgets: () -> Unit,
     onOpenData: () -> Unit,
-    vm: SettingsViewModel = hiltViewModel(),
     securityVm: SecurityViewModel = hiltViewModel(),
     ownAccountsVm: OwnAccountsViewModel = hiltViewModel(),
     tutorialVm: TutorialViewModel = hiltViewModel(),
+    periodVm: PeriodViewModel = hiltViewModel(),
 ) {
-    val senders by vm.senders.collectAsStateWithLifecycle(initialValue = emptyList())
     val security by securityVm.state.collectAsStateWithLifecycle()
     val ownAccounts by ownAccountsVm.accounts.collectAsStateWithLifecycle()
     val ownAccountError by ownAccountsVm.error.collectAsStateWithLifecycle()
@@ -86,23 +89,32 @@ fun SettingsScreen(
     val tutorial by tutorialVm.state.collectAsStateWithLifecycle()
     var pinFlow by remember { mutableStateOf(PinFlow.NONE) }
     var addingOwnAccount by remember { mutableStateOf(false) }
+    val monthStart by periodVm.startDay.collectAsStateWithLifecycle()
+    val carryOver by periodVm.carryOver.collectAsStateWithLifecycle()
+    var pickingMonthStart by remember { mutableStateOf(false) }
 
-    // Two beats live on this screen: "mark your own accounts" (5) and the
-    // optional lock epilogue (7).
+    // Four guide steps live on this screen: own accounts, the month's start day
+    // and budgets in a row, then the optional lock step at the very end.
     val accountsStep = TutorialStep.OWN_ACCOUNTS
+    val monthStep = TutorialStep.MONTH_START
+    val budgetsStep = TutorialStep.BUDGETS
     val lockStep = TutorialStep.APP_LOCK
     val showAccountsBeat = tutorial.showing(accountsStep) && !addingOwnAccount
+    // Hidden while the accounts dialog is open. "Add mine" completes the accounts
+    // step as the dialog opens, which makes this step current behind the dialog.
+    val showMonthBeat = tutorial.showing(monthStep) && !pickingMonthStart && !addingOwnAccount
+    val showBudgetsBeat = tutorial.showing(budgetsStep) && !pickingMonthStart
     val showLockBeat = tutorial.showing(lockStep) && pinFlow == PinFlow.NONE
+    val anyBeat = showAccountsBeat || showMonthBeat || showBudgetsBeat || showLockBeat
     val tone = if (tutorial.resumed) CoachTone.RESUMED else CoachTone.NORMAL
 
-    // Settings is longer than a screen, and both beats anchor to cards below the
-    // fold — Security is the fifth card down. Without this the guide arrived here
-    // pointing at whatever happened to be on screen (Sorting, usually) instead of
-    // the control it was describing.
+    // Settings is longer than the screen, and the cards these steps point at
+    // can be below the fold, so scroll the right one into view.
     val listState = rememberLazyListState()
-    LaunchedEffect(showAccountsBeat, showLockBeat) {
+    LaunchedEffect(showAccountsBeat, showMonthBeat, showBudgetsBeat, showLockBeat) {
         when {
             showAccountsBeat -> listState.animateScrollToItem(ACCOUNTS_CARD)
+            showMonthBeat || showBudgetsBeat -> listState.animateScrollToItem(BUDGETS_CARD)
             showLockBeat -> listState.animateScrollToItem(SECURITY_CARD)
         }
     }
@@ -118,45 +130,29 @@ fun SettingsScreen(
             Text("Settings", style = MaterialTheme.typography.displayMedium)
         }
 
-        // Trusted senders
         item {
             LedgerCard {
-                Text("Trusted senders", style = MaterialTheme.typography.titleLarge)
+                Text("Captured providers", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(6.dp))
                 Text(
-                    "Only messages from these providers are ever parsed.",
-                    style = MaterialTheme.typography.bodyMedium, color = colors.inkMuted,
+                    Institution.PROVIDERS.joinToString(" · ") { it.displayName },
+                    style = MaterialTheme.typography.bodyLarge,
                 )
-                Spacer(Modifier.height(8.dp))
-                if (senders.isEmpty()) {
-                    Text("MTN MoMo · GhanaPay · Telecel Cash", style = MaterialTheme.typography.bodyLarge)
-                } else {
-                    senders.forEach { s ->
-                        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(s.displayName, style = MaterialTheme.typography.bodyLarge)
-                            Text(if (s.liveCaptureEnabled) "Live" else "Paused", color = if (s.liveCaptureEnabled) colors.income else colors.inkMuted, style = MaterialTheme.typography.labelLarge)
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                Text("Add a sender", style = MaterialTheme.typography.titleMedium, color = colors.gold, modifier = Modifier.clickable(onClick = onAddSender))
             }
         }
 
-        // My accounts — powers self-transfer detection
+        // My accounts: used to recognise transfers between the user's own wallets.
         item {
             LedgerCard {
                 Text("My accounts", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Your own mobile-money wallets. Money you move between them " +
-                        "isn't counted as spending — only the fee is. Anything sent " +
-                        "elsewhere, or withdrawn, still counts. One number can hold " +
-                        "more than one wallet; add each separately.",
+                    "Transfers between your own wallets aren't counted as spending.",
                     style = MaterialTheme.typography.bodyMedium, color = colors.inkMuted,
                 )
                 Spacer(Modifier.height(10.dp))
                 if (ownAccounts.isEmpty()) {
                     Text(
-                        "None added yet — every transfer is treated as spending.",
+                        "None added yet.",
                         style = MaterialTheme.typography.bodyMedium, color = colors.inkSoft,
                     )
                 } else {
@@ -172,9 +168,8 @@ fun SettingsScreen(
                                         .joinToString(" · "),
                                     style = MaterialTheme.typography.labelSmall, color = colors.inkMuted,
                                 )
-                                // Spelling out the aliases is what makes a missed
-                                // self-transfer diagnosable: if the name in the
-                                // alert isn't listed here, that's the reason.
+                                // Listing the names helps explain a missed self-transfer: if the name
+                                // in the alert isn't here, that's why.
                                 if (row.names.isNotEmpty()) {
                                     Text(
                                         "Known as ${row.names.joinToString(", ")}",
@@ -210,7 +205,6 @@ fun SettingsScreen(
             }
         }
 
-        // Sorting — rules & categories
         item {
             LedgerCard {
                 Text("Sorting", style = MaterialTheme.typography.titleLarge)
@@ -220,7 +214,7 @@ fun SettingsScreen(
             }
         }
 
-        // Security — opt-in app lock (PIN first, biometric as a convenience on top)
+        // Security: the optional app lock. A PIN first, then biometrics on top.
         item {
             LedgerCard {
                 Text("Security", style = MaterialTheme.typography.titleLarge)
@@ -229,8 +223,7 @@ fun SettingsScreen(
                     Column(Modifier.weight(1f)) {
                         Text("Ask every time the app opens", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            if (security.hasPin) "A PIN is required to open Ledger"
-                            else "Off — Ledger opens straight to your dashboard",
+                            if (security.hasPin) "PIN required" else "Off",
                             style = MaterialTheme.typography.labelSmall, color = colors.inkMuted,
                         )
                     }
@@ -268,17 +261,47 @@ fun SettingsScreen(
             }
         }
 
-        // Privacy
+        // Budgets. Keep this below Security: the guide scrolls to fixed list
+        // positions, and a card added above Security would shift them.
+        item {
+            LedgerCard {
+                Text("Budgets", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(6.dp))
+                ActionLine(
+                    "Monthly budgets",
+                    "Set, change, or remove a limit",
+                    onManageBudgets,
+                    Modifier.spotlight(showBudgetsBeat, RoundedCornerShape(10.dp)),
+                )
+                ActionLine(
+                    "Month starts on",
+                    "The ${ordinal(monthStart)}",
+                    { pickingMonthStart = true },
+                    Modifier.spotlight(showMonthBeat, RoundedCornerShape(10.dp)),
+                )
+                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Carry over savings", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Adds what's left each month to the next",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.inkMuted,
+                        )
+                    }
+                    Switch(checked = carryOver, onCheckedChange = periodVm::setCarryOver)
+                }
+            }
+        }
+
         item {
             LedgerCard {
                 Text("Privacy", style = MaterialTheme.typography.titleLarge)
-                PrivacyLine("Raw SMS is never stored — only parsed fields.")
+                PrivacyLine("Raw SMS is never stored. Only parsed fields are kept.")
                 PrivacyLine("No internet permission. Nothing leaves this device.")
                 PrivacyLine("Database encrypted with a hardware-backed key.")
             }
         }
 
-        // Data — export, backup, import
         item {
             LedgerCard {
                 Text("Data", style = MaterialTheme.typography.titleLarge)
@@ -287,7 +310,7 @@ fun SettingsScreen(
             }
         }
 
-        // The guide is always retrievable — dismissing it is never final.
+        // The guide can always be replayed, so dismissing it is never final.
         item {
             LedgerCard {
                 Text("Getting started", style = MaterialTheme.typography.titleLarge)
@@ -300,12 +323,11 @@ fun SettingsScreen(
                 )
             }
         }
-        item { Spacer(Modifier.height(if (showAccountsBeat || showLockBeat) 200.dp else 90.dp)) }
+        item { Spacer(Modifier.height(if (anyBeat) 200.dp else 90.dp)) }
     }
 
-        // Beats 5 and 7 share this screen but never overlap — the manager only
-        // ever nominates one current beat.
-        CoachScrim(showAccountsBeat || showLockBeat)
+        // Only one guide step is current at a time, so these never overlap.
+        CoachScrim(anyBeat)
         CoachMarkHost(
             visible = showAccountsBeat,
             modifier = Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
@@ -329,6 +351,45 @@ fun SettingsScreen(
             )
         }
         CoachMarkHost(
+            visible = showMonthBeat,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
+        ) {
+            CoachMark(
+                label = coachLabel(monthStep, tone),
+                title = monthStep.title,
+                body = monthStep.body,
+                primaryLabel = monthStep.primary,
+                // The step completes when the dialog closes, whether or not a day was picked.
+                onPrimary = { pickingMonthStart = true },
+                secondaryLabel = monthStep.secondary,
+                onSecondary = { tutorialVm.skip(monthStep) },
+                onDismiss = tutorialVm::dismiss,
+                tone = tone,
+                beak = CoachBeak.Top(0.25f),
+                step = monthStep.number,
+            )
+        }
+        CoachMarkHost(
+            visible = showBudgetsBeat,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
+        ) {
+            CoachMark(
+                label = coachLabel(budgetsStep, tone),
+                title = budgetsStep.title,
+                body = budgetsStep.body,
+                primaryLabel = budgetsStep.primary,
+                // Completed when the user leaves the Budgets screen (see LedgerApp).
+                // Completing it here would send the guide to the next step straight away.
+                onPrimary = onManageBudgets,
+                secondaryLabel = budgetsStep.secondary,
+                onSecondary = { tutorialVm.skip(budgetsStep) },
+                onDismiss = tutorialVm::dismiss,
+                tone = tone,
+                beak = CoachBeak.Top(0.25f),
+                step = budgetsStep.number,
+            )
+        }
+        CoachMarkHost(
             visible = showLockBeat,
             modifier = Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
         ) {
@@ -347,14 +408,23 @@ fun SettingsScreen(
         }
     }
 
+    if (pickingMonthStart) {
+        val closeMonthStart = {
+            pickingMonthStart = false
+            if (tutorial.showing(monthStep)) tutorialVm.complete(monthStep)
+        }
+        MonthStartDialog(
+            current = monthStart,
+            onPick = { periodVm.setStartDay(it); closeMonthStart() },
+            onDismiss = closeMonthStart,
+        )
+    }
     if (addingOwnAccount) {
         OwnAccountDialog(
             onConfirm = { identifier, label, institution, names ->
                 ownAccountsVm.add(identifier, label, institution, names)
-                // Both routes to this dialog spotlight a real control, so the beat
-                // has to close here rather than only in the coach-mark's button —
-                // a user who tapped "Add an account" directly did the thing and
-                // was still being asked to.
+                // The user can reach this dialog from the guide's button or by tapping
+                // "Add an account" directly. Either way they did the step, so complete it.
                 if (tutorial.showing(accountsStep)) tutorialVm.complete(accountsStep)
                 addingOwnAccount = false
             },
@@ -372,9 +442,8 @@ fun SettingsScreen(
             onDismiss = { pinFlow = PinFlow.NONE },
             onSubmit = { pin ->
                 securityVm.setPin(pin)
-                // Same reason as the own-account dialog: reaching this via the
-                // spotlit switch rather than the coach-mark's button still
-                // finishes the beat.
+                // As with the accounts dialog: turning the switch on directly also
+                // completes the step.
                 if (tutorial.showing(lockStep)) tutorialVm.complete(lockStep)
                 pinFlow = PinFlow.NONE
                 null
@@ -407,15 +476,13 @@ fun SettingsScreen(
 private enum class PinFlow { NONE, SET, CHANGE, CONFIRM_OFF }
 
 /**
- * Captures one of the user's own accounts: its number, which provider it lives
- * with, and the names other providers print for it.
+ * Adds one of the user's own accounts: its number, its provider, and the names
+ * other providers print for it.
  *
- * The names field is the point of this dialog. GhanaPay writes the account
- * *number* into its alerts, so a transfer to the user's own MoMo is recognised
- * from the number alone. MTN writes a *name* — "payment received from AMA
- * OWUSU" — which no amount of number-matching can catch, so that leg of the
- * same transfer was counted as income from a stranger. Listing the names makes
- * both halves recognisable.
+ * The names matter most. GhanaPay puts the account number in its alerts, so a
+ * transfer to the user's own wallet is recognised from the number. MTN puts a
+ * name instead ("payment received from AMA OWUSU"), so that side of the
+ * transfer can only be recognised if the name is listed here.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -434,12 +501,6 @@ private fun OwnAccountDialog(
         title = { Text("Add one of your wallets") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    "The mobile-money number for this wallet. Any format works — " +
-                        "024…, +23324…, spaces and dashes are all fine.",
-                    style = MaterialTheme.typography.bodyMedium, color = colors.inkMuted,
-                )
-                Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = identifier,
                     onValueChange = { identifier = it },
@@ -462,17 +523,10 @@ private fun OwnAccountDialog(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     SenderChip("Not sure", institution == null) { institution = null }
-                    Institution.entries.forEach { inst ->
+                    Institution.PROVIDERS.forEach { inst ->
                         SenderChip(inst.displayName, institution == inst) { institution = inst }
                     }
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Wallets are kept apart by provider, so the same number can be " +
-                        "added once for each — useful when one line carries both a " +
-                        "MoMo and a GhanaPay account under different names.",
-                    style = MaterialTheme.typography.labelSmall, color = colors.inkMuted,
-                )
 
                 Spacer(Modifier.height(14.dp))
                 OutlinedTextField(
@@ -484,11 +538,7 @@ private fun OwnAccountDialog(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Separate several with commas. MTN says \"received from " +
-                        "{name}\" instead of giving a number, so without the name " +
-                        "a transfer from your own wallet looks like income from " +
-                        "someone else. Different providers may print different " +
-                        "names for the same account — list them all.",
+                    "The name alerts show instead of the number. Separate several with commas.",
                     style = MaterialTheme.typography.labelSmall, color = colors.inkMuted,
                 )
 
@@ -611,10 +661,57 @@ private fun PrivacyLine(text: String) {
     Text("• $text", style = MaterialTheme.typography.bodyMedium, color = LedgerThemeTokens.colors.inkSoft, modifier = Modifier.padding(top = 6.dp))
 }
 
+/** Day-of-month grid from 1 to 31. See [com.ledger.domain.model.FiscalMonth]. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ActionLine(title: String, sub: String, onClick: () -> Unit) {
+private fun MonthStartDialog(current: Int, onPick: (Int) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = LedgerPalette.Surface,
+        title = { Text("Month starts on", style = MaterialTheme.typography.titleLarge) },
+        text = {
+            Column {
+                Text(
+                    "Set it to your payday. Shorter months use their last day.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = LedgerThemeTokens.colors.inkMuted,
+                )
+                Spacer(Modifier.height(12.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    maxItemsInEachRow = 7,
+                ) {
+                    (1..FiscalMonth.MAX_START_DAY).forEach { day ->
+                        val active = day == current
+                        Box(
+                            Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(if (active) LedgerPalette.Gold else LedgerPalette.SurfaceSunken)
+                                .clickable { onPick(day) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "$day",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (active) androidx.compose.ui.graphics.Color.White else LedgerPalette.Ink,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Done", color = LedgerPalette.Gold, fontWeight = FontWeight.Bold) }
+        },
+    )
+}
+
+@Composable
+private fun ActionLine(title: String, sub: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
+        modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {

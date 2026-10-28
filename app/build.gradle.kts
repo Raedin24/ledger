@@ -10,10 +10,10 @@ plugins {
     id("androidx.room")
 }
 
-// Release signing credentials come from a gitignored keystore.properties, or from
-// the environment for CI. Neither the keystore nor its passwords enter the
-// repository. The signing key is permanent: Android refuses to update an app
-// whose certificate changed.
+// Release signing details come from a gitignored keystore.properties, or from
+// environment variables for CI. Neither the keystore nor its passwords are in
+// the repository. The signing key is permanent: Android won't update an app
+// whose certificate has changed.
 val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
@@ -35,20 +35,19 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        // Diverges from `namespace`, which stays com.ledger.app: namespace only
-        // decides where R and BuildConfig are generated.
+        // Different from `namespace`, which stays com.ledger.app. The namespace
+        // only decides where R and BuildConfig are generated.
         applicationId = "io.github.raedin24.ledger"
-        minSdk = 26          // Keystore StrongBox / BiometricPrompt baseline
+        minSdk = 26  // needed for Keystore StrongBox and BiometricPrompt
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // No default network config; the app requests no INTERNET permission.
 
-        // FLAG_SECURE is on unless a build explicitly opts out. Declared here so
-        // every build type inherits the safe value and only `screenshot` differs
-        // — a new build type cannot forget to set it and silently ship a window
-        // that screen-records.
+        // FLAG_SECURE (no screenshots or screen recording) is on unless a build
+        // type turns it off. Setting it here means every build type gets the safe
+        // value, and only `screenshot` changes it.
         buildConfigField("boolean", "ALLOW_SCREENSHOTS", "false")
     }
 
@@ -64,15 +63,14 @@ android {
     }
 
     buildTypes {
-        // Store/README screenshots only. FLAG_SECURE blocks screen capture, so it
-        // has to come off to photograph the app at all — and the one thing we must
-        // never do is take that flag off the build people install.
+        // For README screenshots only. FLAG_SECURE blocks screen capture, so it has
+        // to be off to photograph the app, and it must never be off in the build
+        // people install.
         //
-        // The applicationIdSuffix is the point of this variant, not a detail: it
-        // installs *alongside* the real app as a separate package, which means its
-        // own database and its own Keystore entry. Screenshots therefore get seeded
-        // demo data, and the real ledger is never opened, never cleared and never
-        // photographed. The variant is meant to be uninstalled after use.
+        // The applicationIdSuffix makes this a separate package that installs next
+        // to the real app, with its own database and Keystore entry. Screenshots
+        // use made-up demo data, and the real ledger is never opened. Uninstall it
+        // after use.
         create("screenshot") {
             initWith(getByName("debug"))
             applicationIdSuffix = ".screenshot"
@@ -80,21 +78,26 @@ android {
             matchingFallbacks += listOf("debug")
             buildConfigField("boolean", "ALLOW_SCREENSHOTS", "true")
         }
-        // Measurement-only variant. `debuggable` costs ART most of its optimisation,
-        // so frame timings from the debug build describe the debug build and nothing
-        // else — this is the one to profile on. Signed with the auto-generated debug
-        // key purely so it installs; the real release stays deliberately unsigned.
+        // For performance measurement only. A debuggable build runs much slower,
+        // so timings from the debug build don't reflect the real app; profile this
+        // one instead. It is signed with the debug key so it installs.
+        //
+        // Like `screenshot`, it is a separate package with its own empty database,
+        // with the demo seed and ingest benchmark turned on. Never shipped.
         create("profile") {
             initWith(getByName("release"))
             isMinifyEnabled = false
             isShrinkResources = false
             signingConfig = signingConfigs.getByName("debug")
+            applicationIdSuffix = ".profile"
+            versionNameSuffix = "-profile"
+            buildConfigField("boolean", "ALLOW_SCREENSHOTS", "true")
             matchingFallbacks += listOf("release")
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            isDebuggable = false          // adb run-as cannot read storage on release
+            isDebuggable = false  // release storage can't be read with adb run-as
             signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -105,10 +108,10 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = true       // ALLOW_SCREENSHOTS above needs BuildConfig generated
+        buildConfig = true  // ALLOW_SCREENSHOTS above needs BuildConfig
     }
-    // Compose compiler now comes from the org.jetbrains.kotlin.plugin.compose
-    // Gradle plugin (Kotlin 2.x); no composeOptions{} block needed.
+    // The Compose compiler comes from the org.jetbrains.kotlin.plugin.compose
+    // Gradle plugin, so no composeOptions block is needed.
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -117,8 +120,8 @@ android {
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
 
-// Room schema export (unblocked now the project path has no spaces). Emitted
-// JSON under app/schemas/<variant>/<db>/<version>.json — check these in.
+// Room exports each schema version as JSON under
+// app/schemas/<variant>/<db>/<version>.json. Commit these files.
 room {
     schemaDirectory("$projectDir/schemas")
 }
@@ -138,41 +141,41 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.fragment:fragment-ktx:1.8.0")   // FragmentActivity for BiometricPrompt
-    // Backports the Android 12 splash-screen API, and (the reason it's here) lets
-    // the system splash be suppressed to a bare page so the in-app splash owns the
-    // seal animation end to end.
+    // The Android 12 splash-screen API. Used to reduce the system splash to a
+    // plain page, so the in-app splash can run the whole seal animation.
     implementation("androidx.core:core-splashscreen:1.0.1")
 
     // Dependency injection
-    implementation("com.google.dagger:hilt-android:2.58")   // 2.58 = last Hilt supporting AGP 8.x
+    implementation("com.google.dagger:hilt-android:2.58")  // 2.58 is the last Hilt version that supports AGP 8.x
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
     ksp("com.google.dagger:hilt-compiler:2.58")
 
-    // Room + encrypted storage (SQLCipher passphrase wrapped by Android Keystore)
+    // Room and encrypted storage (SQLCipher, with the key protected by the Android Keystore)
     implementation("androidx.room:room-runtime:2.8.4")
     implementation("androidx.room:room-ktx:2.8.4")
     ksp("androidx.room:room-compiler:2.8.4")
-    // Modern, maintained SQLCipher AAR (replaces retired android-database-sqlcipher;
-    // fixes 16 KB page-size packaging for Android 15+). Same net.sqlcipher.* API.
+    // The maintained SQLCipher library. It also packages correctly for the
+    // 16 KB page size on Android 15+.
     implementation("net.zetetic:sqlcipher-android:4.17.0")
     implementation("androidx.sqlite:sqlite-ktx:2.4.0")
 
     // Biometric app-lock
     implementation("androidx.biometric:biometric:1.1.0")
 
-    // Kotlinx serialization for JSON export/backup
+    // Kotlinx serialization for JSON export and backup
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
 }
 
-// Releases are always signed: without credentials the build fails rather than
-// producing an unsigned APK. Checked on the task rather than at configuration
-// time, so debug builds and tests still run with no signing material present.
+// Release builds are always signed: without signing details the build
+// fails instead of producing an unsigned APK. This is checked when the task
+// runs, not at configuration time, so debug builds and tests work without
+// any signing setup.
 tasks.matching { it.name == "packageRelease" }.configureEach {
-    // Read into a local at configuration time. Referencing the script property
-    // straight from doFirst captures the script object itself, which the
-    // configuration cache cannot serialise.
+    // Copy into a local value at configuration time. Using the script property
+    // inside doFirst would capture the whole script object, which the
+    // configuration cache can't store.
     val signingConfigured = canSignRelease
     doFirst {
         if (!signingConfigured) throw GradleException(

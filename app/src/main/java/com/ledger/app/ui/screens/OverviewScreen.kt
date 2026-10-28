@@ -1,5 +1,6 @@
 package com.ledger.app.ui.screens
 
+import com.ledger.app.data.db.TransactionEntity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,12 +21,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,12 +32,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.ledger.app.security.CapturePermission
-import com.ledger.app.tutorial.CaptureDeniedCopy
+import com.ledger.app.data.budget.BudgetLevel
+import com.ledger.app.data.budget.BudgetStatus
 import com.ledger.app.tutorial.TutorialStep
 import com.ledger.app.ui.components.CapturePermissionBanner
 import com.ledger.app.ui.components.CategoryBar
@@ -73,11 +68,13 @@ import java.time.LocalTime
 @Composable
 fun OverviewScreen(
     onSeeAll: () -> Unit,
-    onAddSender: () -> Unit = {},
+    onPickCategories: () -> Unit = {},
     onReview: () -> Unit = {},
-    onOpenTransaction: (Long) -> Unit = {},
+    onOpenTransaction: (TransactionEntity) -> Unit = {},
     onOpenData: () -> Unit = {},
     onOpenBreakdown: () -> Unit = {},
+    onOpenBudgets: () -> Unit = {},
+    onOpenCash: () -> Unit = {},
     vm: OverviewViewModel = hiltViewModel(),
     tutorialVm: TutorialViewModel = hiltViewModel(),
 ) {
@@ -86,38 +83,18 @@ fun OverviewScreen(
     val colors = LedgerThemeTokens.colors
     val context = LocalContext.current
 
-    // Wall-clock reads, done once per composition rather than on every scroll
-    // frame — the header is inside the LazyColumn's content lambda.
+    // Read the clock once per composition, not on every scroll frame, since the
+    // header is inside the LazyColumn.
     val monthLabel = remember {
         val now = LocalDate.now()
         now.month.name.lowercase().replaceFirstChar { it.uppercase() } + " ${now.year}"
     }
     val greetingText = remember { greeting() }
 
-    // The guide offers itself once, on a genuine first launch.
+    // Starts the guide on first launch (or for new steps after an update).
     LaunchedEffect(Unit) { tutorialVm.startIfFirstRun() }
 
-    // Beat 1 only makes sense while the welcome is on screen — that's where its
-    // anchor lives. Capture state is re-read on resume so granting permission
-    // swaps the amber "no SMS access" branch back to the ordinary beat.
-    var captureOn by remember { mutableStateOf(CapturePermission.isGranted(context)) }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) captureOn = CapturePermission.isGranted(context)
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-    // Beat 1 shows on any loaded dashboard, not only an empty one.
-    //
-    // Gating it on the first-run welcome meant replaying the guide with data
-    // already captured auto-skipped it, so the walkthrough appeared to start at
-    // step 2 and step 1 was never seen. Its lesson — add a sender and the ledger
-    // fills itself — applies just as well to a second sender, so the beat stays
-    // and only its anchor changes: it spotlights the welcome CTA when that CTA is
-    // on screen, and stands on its own when it isn't.
-    val showBeat1 = tutorial.showing(TutorialStep.ADD_SENDER) && state.loaded
+    val showCategoriesStep = tutorial.showing(TutorialStep.TOP_CATEGORIES) && state.loaded
 
     Box(Modifier.fillMaxSize()) {
     LazyColumn(
@@ -126,55 +103,58 @@ fun OverviewScreen(
     ) {
         item {
             Spacer(Modifier.height(18.dp))
-            // Shows only while RECEIVE_SMS is not granted; renders nothing (and
-            // costs no layout) once capture is live.
+            // Shown only while RECEIVE_SMS isn't granted.
             CapturePermissionBanner(Modifier.padding(bottom = 14.dp))
-            Text(monthLabel, style = MaterialTheme.typography.labelLarge, color = colors.inkMuted)
+            Text(state.periodLabel.ifEmpty { monthLabel }, style = MaterialTheme.typography.labelLarge, color = colors.inkMuted)
             Text(greetingText, style = MaterialTheme.typography.displayMedium)
             Spacer(Modifier.height(6.dp))
         }
 
-        // Nothing is known yet (a cold SQLCipher open takes a beat, and longer
-        // still on a freshly-backfilled ledger). Show the shape of the dashboard
-        // that's coming: the header alone read as a hang, and a dashboard full of
-        // zeros read as an empty ledger instead of the welcome.
+        // Nothing loaded yet: opening the encrypted database takes a moment. Show
+        // placeholder shapes, so the screen doesn't look stuck or empty.
         if (!state.loaded) {
             item { OverviewSkeleton(Modifier.padding(top = 4.dp)) }
             item { Spacer(Modifier.height(90.dp)) }
             return@LazyColumn
         }
 
-        // First run — replace the whole dashboard body with the welcome state.
+        // First run: show the welcome instead of the dashboard.
         if (state.isFirstRun) {
             item {
                 EmptyState(
                     title = "Welcome to Ledger",
-                    message = "Add a trusted sender and your spending fills in automatically as SMS alerts arrive — all on this phone.",
+                    message = "MoMo, GhanaPay and Telecel Cash alerts are recorded as they arrive.",
                     modifier = Modifier.padding(top = 20.dp),
                     titleStyle = MaterialTheme.typography.headlineMedium,
-                    actionLabel = "Add your first sender",
-                    onAction = onAddSender,
-                    spotlightAction = showBeat1 && captureOn,
+                    actionLabel = "Import past alerts",
+                    onAction = onOpenData,
                     footnote = { PrivacyFootnote("Nothing leaves this device") },
                     illustration = { EnvelopeIllustration(EmptyBadge.Check) },
                 )
             }
-            // Room for the coach-mark to sit without covering the action.
-            item { Spacer(Modifier.height(if (showBeat1) 210.dp else 90.dp)) }
+            item { CashCard(state.cashMinor, onOpenCash) }
+            // Room for the guide's card without covering the action.
+            item { Spacer(Modifier.height(if (showCategoriesStep) 210.dp else 90.dp)) }
             return@LazyColumn
         }
 
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                // Same vocabulary as every other surface — see directionLabel.
+                // Same wording as everywhere else; see directionLabel.
                 MoneyStat(MONEY_OUT.uppercase(), formatCedis(state.spentMinor), "this month", colors.spend, Modifier.weight(1f))
                 MoneyStat(MONEY_IN.uppercase(), formatCedis(state.receivedMinor), "this month", colors.income, Modifier.weight(1f))
             }
         }
 
+        if (state.loadFailed) {
+            item { EmptyHint("Some figures couldn't be loaded.") }
+        }
+
         if (state.reviewCount > 0) {
             item { ReviewBanner(state.reviewCount, onReview) }
         }
+
+        item { CashCard(state.cashMinor, onOpenCash) }
 
         item {
             LedgerCard {
@@ -187,11 +167,18 @@ fun OverviewScreen(
                         fontWeight = FontWeight.Bold,
                     )
                 }
+                // Shown apart from Money In, so carried-over savings never look like
+                // income earned this month.
+                state.carriedMinor?.let { carried ->
+                    Spacer(Modifier.height(8.dp))
+                    SavingsLine("Carried over", carried)
+                    SavingsLine("Balance", carried + state.savingsMinor, bold = true)
+                }
             }
         }
 
-        // Cash-flow timeline — daily spend across the month, with the running
-        // average and a month-over-month change badge.
+        // Cash-flow timeline: daily spending across the month, with the average
+        // and the change from last month.
         item {
             LedgerCard {
                 Row(
@@ -230,7 +217,35 @@ fun OverviewScreen(
             }
         }
 
-        // The top five always provokes "and the rest?" — so the header answers it.
+        // Budgets sit above Top spending, because a limit about to be passed
+        // matters more. The card only appears once a budget exists.
+        if (state.budgets.isNotEmpty()) {
+            item { SectionHeader("Budgets", action = "Manage", onAction = onOpenBudgets) }
+            item {
+                LedgerCard {
+                    state.budgets.take(BUDGETS_ON_DASHBOARD).forEachIndexed { i, budget ->
+                        if (i > 0) Spacer(Modifier.height(14.dp))
+                        BudgetLine(budget)
+                    }
+                    // The list is worst first, so the hidden ones are usually fine. Count
+                    // the ones that aren't, rather than assuming.
+                    val hidden = state.budgets.drop(BUDGETS_ON_DASHBOARD)
+                    if (hidden.isNotEmpty()) {
+                        val needAttention = hidden.count { it.level != BudgetLevel.OK }
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            if (needAttention == 0) "${hidden.size} more within budget"
+                            else "${hidden.size} more · $needAttention over or close",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (needAttention == 0) colors.inkMuted else colors.spend,
+                            modifier = Modifier.clickable(onClick = onOpenBudgets),
+                        )
+                    }
+                }
+            }
+        }
+
+        // "All categories" opens the full breakdown behind the top five.
         item { SectionHeader("Top spending", action = "All categories", onAction = onOpenBreakdown) }
         if (state.topCategories.isEmpty()) {
             item { EmptyHint("No categorised spending yet this month.") }
@@ -253,7 +268,7 @@ fun OverviewScreen(
         if (state.largestExpenses.isNotEmpty()) {
             item { SectionHeader("Largest this month") }
             items(state.largestExpenses, key = { "largest-${it.id}" }, contentType = { "txn-row" }) { txn ->
-                TransactionRow(txn, onClick = { onOpenTransaction(txn.id) })
+                TransactionRow(txn, onClick = { onOpenTransaction(txn) })
             }
         }
 
@@ -262,51 +277,66 @@ fun OverviewScreen(
             item { EmptyHint("Your transactions will appear here.") }
         } else {
             items(state.recent, key = { "recent-${it.id}" }, contentType = { "txn-row" }) { txn ->
-                TransactionRow(txn, onClick = { onOpenTransaction(txn.id) })
+                TransactionRow(txn, onClick = { onOpenTransaction(txn) })
             }
         }
-        // Room for beat 1's coach-mark when it's shown over a populated dashboard.
-        item { Spacer(Modifier.height(if (showBeat1) 210.dp else 90.dp)) }
+        // Room for the guide's card over a full dashboard.
+        item { Spacer(Modifier.height(if (showCategoriesStep) 210.dp else 90.dp)) }
     }
 
-        // Beat 1. Two faces: the ordinary "add a sender" prompt, and — when the
-        // user has declined SMS access — an amber reroute to importing, so
-        // declining never dead-ends the guide.
-        CoachScrim(showBeat1)
+        CoachScrim(showCategoriesStep)
         CoachMarkHost(
-            visible = showBeat1,
+            visible = showCategoriesStep,
             modifier = Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
         ) {
-            val step = TutorialStep.ADD_SENDER
-            if (captureOn) {
-                CoachMark(
-                    label = coachLabel(step, if (tutorial.resumed) CoachTone.RESUMED else CoachTone.NORMAL),
-                    title = step.title,
-                    body = step.body,
-                    primaryLabel = step.primary,
-                    onPrimary = { tutorialVm.complete(step); onAddSender() },
-                    secondaryLabel = step.secondary,
-                    onSecondary = { tutorialVm.skip(step) },
-                    onDismiss = tutorialVm::dismiss,
-                    tone = if (tutorial.resumed) CoachTone.RESUMED else CoachTone.NORMAL,
-                    // Only point at something when there is something to point at.
-                    beak = if (state.isFirstRun) CoachBeak.Top(0.5f) else CoachBeak.None,
-                    step = step.number,
-                )
-            } else {
-                CoachMark(
-                    label = CaptureDeniedCopy.LABEL,
-                    title = CaptureDeniedCopy.TITLE,
-                    body = CaptureDeniedCopy.BODY,
-                    primaryLabel = CaptureDeniedCopy.PRIMARY,
-                    onPrimary = { tutorialVm.complete(step); onOpenData() },
-                    secondaryLabel = CaptureDeniedCopy.SECONDARY,
-                    onSecondary = { tutorialVm.skip(step) },
-                    onDismiss = tutorialVm::dismiss,
-                    tone = CoachTone.WARNING,
-                    beak = CoachBeak.None,
-                )
-            }
+            val step = TutorialStep.TOP_CATEGORIES
+            val tone = if (tutorial.resumed) CoachTone.RESUMED else CoachTone.NORMAL
+            CoachMark(
+                label = coachLabel(step, tone),
+                title = step.title,
+                body = step.body,
+                primaryLabel = step.primary,
+                // Completed when the picker is saved (see LedgerApp).
+                onPrimary = onPickCategories,
+                secondaryLabel = step.secondary,
+                onSecondary = { tutorialVm.skip(step) },
+                onDismiss = tutorialVm::dismiss,
+                tone = tone,
+                beak = CoachBeak.None,
+                step = step.number,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SavingsLine(label: String, minor: Long, bold: Boolean = false) {
+    val colors = LedgerThemeTokens.colors
+    Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = colors.inkMuted)
+        Text(
+            formatCedis(minor),
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (minor >= 0) LedgerPalette.Ink else colors.spend,
+            fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
+        )
+    }
+}
+
+/** Cash on hand, and the way into the cash ledger. */
+@Composable
+private fun CashCard(balanceMinor: Long, onClick: () -> Unit) {
+    val colors = LedgerThemeTokens.colors
+    LedgerCard(modifier = Modifier.clickable(onClick = onClick)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Cash on hand", style = MaterialTheme.typography.titleMedium, color = colors.inkSoft, modifier = Modifier.weight(1f))
+            Text(
+                formatCedis(balanceMinor),
+                style = MaterialTheme.typography.titleMedium,
+                color = if (balanceMinor < 0) colors.spend else LedgerPalette.Ink,
+                fontWeight = FontWeight.Bold,
+            )
+            Text("  ›", style = MaterialTheme.typography.titleMedium, color = colors.inkMuted)
         }
     }
 }
@@ -338,13 +368,55 @@ private fun ReviewBanner(count: Int, onClick: () -> Unit) {
                 color = LedgerPalette.GoldDeep,
                 fontWeight = FontWeight.SemiBold,
             )
-            Text("New senders waiting to be sorted", style = MaterialTheme.typography.labelSmall, color = LedgerPalette.Gold)
         }
         Text("›", style = MaterialTheme.typography.titleLarge, color = LedgerPalette.GoldDeep)
     }
 }
 
-/** One row of the Top-spending list: category mark + amount, over a proportional bar. */
+/**
+ * How many budgets the dashboard shows. They are sorted worst first, so three
+ * usually covers everything that needs attention.
+ */
+private const val BUDGETS_ON_DASHBOARD = 3
+
+/**
+ * One budget on the dashboard. The bar is coloured by how close the limit is,
+ * not by category, because that is what this card is for.
+ */
+@Composable
+private fun BudgetLine(status: BudgetStatus) {
+    val accent = when (status.level) {
+        BudgetLevel.OK -> LedgerPalette.Income
+        BudgetLevel.NEAR -> LedgerPalette.Gold
+        BudgetLevel.OVER -> LedgerPalette.Spend
+    }
+    Column {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                CategoryMark(status.category)
+                Text(status.category, style = MaterialTheme.typography.bodyLarge, color = LedgerPalette.Ink)
+            }
+            Text(
+                if (status.level == BudgetLevel.OVER) {
+                    "${formatCedis(-status.remainingMinor)} over"
+                } else {
+                    "${formatCedis(status.remainingMinor)} left"
+                },
+                style = MaterialTheme.typography.titleMedium,
+                color = accent,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+        Spacer(Modifier.height(7.dp))
+        CategoryBar(status.fraction, accent)
+    }
+}
+
+/** One row of the Top spending list: the category and amount over a proportional bar. */
 @Composable
 private fun TopCategoryRow(label: String, amount: String, fraction: Float) {
     Column {

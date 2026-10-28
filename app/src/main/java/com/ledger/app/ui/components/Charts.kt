@@ -23,16 +23,16 @@ import androidx.compose.ui.unit.dp
 import com.ledger.app.ui.theme.LedgerPalette
 
 /**
- * A dependency-free daily bar chart (the cash-flow timeline). Each value is one
- * day; bar height is proportional to the largest day so the shape reads as a
- * spending rhythm rather than absolute figures. Zero-days show as a faint track.
+ * A daily bar chart for the cash-flow timeline, drawn without a chart library.
+ * Each value is one day, and bar height is relative to the biggest day, so it
+ * shows the pattern of spending rather than exact figures. Days with nothing
+ * spent show a faint track.
  */
 @Composable
 /**
- * @param elapsed how many leading entries have actually happened. Days beyond it
- *  are drawn at reduced opacity, so a day you spent nothing on stays visually
- *  distinct from a day that has not arrived — without which an early month reads
- *  as a month of zero spending rather than a month barely begun.
+ * @param elapsed how many of the days have happened. Later days are drawn
+ *  fainter, so a day with no spending looks different from a day still to
+ *  come, and an early month doesn't look like a month of no spending.
  */
 fun MiniBarChart(
     values: List<Long>,
@@ -49,7 +49,7 @@ fun MiniBarChart(
         val radius = CornerRadius(barW / 2f, barW / 2f)
         values.forEachIndexed { i, v ->
             val x = i * (barW + gap)
-            // Faint full-height track so sparse months still read as a timeline.
+            // A faint full-height track, so a quiet month still looks like a timeline.
             drawRoundRect(
                 color = trackColor,
                 alpha = if (i < elapsed) 1f else 0.45f,
@@ -70,16 +70,16 @@ fun MiniBarChart(
     }
 }
 
-/** Hoisted so every bar and badge shares one shape instance. */
+/** Shared by every bar and badge. */
 private val BarShape = RoundedCornerShape(4.dp)
 private val BadgeShape = RoundedCornerShape(8.dp)
 
 /**
- * A thin proportional track for the top-spending list. [fraction] is clamped to
- * 0..1; the fill uses the category accent at the mock's 72% opacity.
+ * A thin proportional bar for the Top spending list. [fraction] is clamped to
+ * 0..1, and the fill is the category's accent at 72% opacity.
  *
- * Both layers draw their own rounded rect rather than clipping to one, so a list
- * of these doesn't promote a graphics layer per row.
+ * Both layers draw their own rounded shape instead of clipping, which keeps a
+ * long list of these cheap to draw.
  */
 @Composable
 fun CategoryBar(fraction: Float, color: Color, modifier: Modifier = Modifier) {
@@ -102,11 +102,10 @@ fun CategoryBar(fraction: Float, color: Color, modifier: Modifier = Modifier) {
 data class DonutSlice(val value: Long, val color: Color)
 
 /**
- * A ring chart — the breakdown's shape at a glance, with the total sitting in the
- * hole where it can be read against the slices rather than beside them.
+ * A ring chart showing the breakdown at a glance, with the total in the middle.
  *
- * Drawn as arcs on a Canvas rather than pulled from a chart library: it keeps the
- * app dependency-lean and offline, which is the whole premise.
+ * Drawn as arcs on a Canvas instead of using a chart library, which keeps the
+ * app small and fully offline.
  */
 @Composable
 fun DonutChart(
@@ -123,8 +122,7 @@ fun DonutChart(
             val topLeft = Offset((size.width - diameter) / 2f, (size.height - diameter) / 2f)
             val ring = Stroke(width = thickness, cap = StrokeCap.Butt)
 
-            // A faint full ring underneath, so an empty month still reads as a
-            // chart rather than as a rendering failure.
+            // A faint full ring underneath, so an empty month still looks like a chart.
             drawArc(trackColor, 0f, 360f, false, topLeft, arcSize, style = ring)
 
             val total = slices.sumOf { it.value }.coerceAtLeast(1L)
@@ -132,8 +130,7 @@ fun DonutChart(
             slices.forEach { slice ->
                 val sweep = 360f * (slice.value.toFloat() / total)
                 if (sweep > 0f) {
-                    // A hair of background between wedges keeps neighbouring
-                    // accents from reading as one block.
+                    // A thin gap between slices, so neighbouring colours don't run together.
                     drawArc(
                         color = slice.color,
                         startAngle = start + SLICE_GAP / 2f,
@@ -151,15 +148,17 @@ fun DonutChart(
     }
 }
 
-/** Degrees of background left between wedges, and the floor that keeps a tiny
- *  slice visible instead of vanishing into the gap. */
+/**
+ * Degrees of gap between slices, and the smallest size a slice is drawn at,
+ * so a tiny slice doesn't disappear into the gap.
+ */
 private const val SLICE_GAP = 1.6f
 private const val MIN_SWEEP = 0.8f
 
 /**
- * Small pill showing the month-over-month spend change. Spending *more* is red
- * (terracotta), spending *less* is green — the direction the user cares about,
- * not raw arithmetic sign.
+ * A small pill showing the change in spending from last month. Spending more
+ * is shown in terracotta and spending less in green, which matches what the
+ * user cares about rather than the sign of the number.
  */
 @Composable
 fun MonthDeltaBadge(percent: Int, modifier: Modifier = Modifier) {

@@ -1,5 +1,6 @@
 package com.ledger.app.data.backup
 
+import com.ledger.app.data.db.BudgetEntity
 import com.ledger.app.data.db.CategoryEntity
 import com.ledger.app.data.db.CategoryKind
 import com.ledger.app.data.db.OwnAccountEntity
@@ -10,16 +11,18 @@ import com.ledger.domain.model.OwnAccountMatcher
 import kotlinx.serialization.Serializable
 
 /**
- * The JSON/`.ledger` backup document. Everything needed to rebuild the ledger on
- * another device: transactions (with their stable dedup keys, so a re-import
- * merges cleanly), rules, categories, and the user's own accounts. Deliberately
- * excludes DB row ids — identity is re-established from [TxnDto.dedupKey] /
- * natural keys on import.
+ * The backup file format, used for both `.json` and encrypted `.ledger` files.
+ * It holds everything needed to rebuild the ledger on another device:
+ * transactions, rules, categories, budgets and the user's own accounts.
  *
- * Schema 2 added [ownAccounts]. Restoring a schema-1 file still works — the field
- * defaults to empty — but such a restore lands with no own accounts registered,
- * so every past internal transfer counts as spending until they are re-entered.
- * That is exactly the data loss carrying them here prevents going forward.
+ * Database row ids are not included. On import, rows are matched by
+ * [TxnDto.dedupKey] and by natural keys such as names.
+ *
+ * Fields have only ever been added (the schema number counts the additions),
+ * and every field has a default. An older file restores on a newer build, and
+ * a newer file still opens on an older build. A file without own accounts
+ * restores fine, but past transfers between the user's wallets will count as
+ * spending until the accounts are added again.
  */
 @Serializable
 data class BackupFile(
@@ -30,8 +33,9 @@ data class BackupFile(
     val rules: List<RuleDto> = emptyList(),
     val categories: List<CategoryDto> = emptyList(),
     val ownAccounts: List<OwnAccountDto> = emptyList(),
+    val budgets: List<BudgetDto> = emptyList(),
 ) {
-    companion object { const val SCHEMA = 2 }
+    companion object { const val SCHEMA = 4 }
 }
 
 @Serializable
@@ -52,6 +56,8 @@ data class TxnDto(
     val person: String? = null,
     val notes: String? = null,
     val needsReview: Boolean,
+    /** [com.ledger.app.data.db.CashMove] value, or null. */
+    val cashMove: String? = null,
 )
 
 @Serializable
@@ -70,15 +76,26 @@ data class CategoryDto(
     val name: String,
     val position: Int,
     val enabled: Boolean = true,
-    /** [com.ledger.app.data.db.CategoryKind] name. Defaults to spending so a
-     *  pre-split backup restores as it was written. */
+    /**
+     * A [com.ledger.app.data.db.CategoryKind] name. Defaults to money out, which is
+     * what every category was in older backups.
+     */
     val kind: String = CategoryKind.OUT.name,
+    /** One of the user's favourite categories, which pickers show first. */
+    val favorite: Boolean = false,
+)
+
+/** A monthly limit, keyed by category name (see [BudgetEntity]). */
+@Serializable
+data class BudgetDto(
+    val category: String,
+    val limitMinor: Long,
+    val updatedAt: Long = 0,
 )
 
 /**
- * One of the user's own accounts, with the provider names it answers to nested
- * rather than held in a parallel list — there is no way to serialise a dangling
- * alias, so a restore can't produce one.
+ * One of the user's own accounts, with its names nested inside it. Nesting
+ * means a restore can never produce a name that belongs to no account.
  */
 @Serializable
 data class OwnAccountDto(
@@ -90,21 +107,23 @@ data class OwnAccountDto(
     val names: List<String> = emptyList(),
 )
 
-// ---- entity <-> DTO ----
+// ---- Entity <-> DTO ----
 
 fun TransactionEntity.toDto() = TxnDto(
     dedupKey = dedupKey, reference = reference, institution = institution, direction = direction,
     amountMinor = amountMinor, balanceMinor = balanceMinor, feeMinor = feeMinor, currency = currency,
     counterparty = counterparty, referenceHint = referenceHint, occurredAt = occurredAt,
     capturedAt = capturedAt, category = category, person = person, notes = notes, needsReview = needsReview,
+    cashMove = cashMove,
 )
 
-/** Rebuilds an entity for insert (id = 0 → Room assigns; dedupKey guards duplicates). */
+/** Rebuilds an entity for insert. Room assigns the id; dedupKey prevents duplicates. */
 fun TxnDto.toEntity() = TransactionEntity(
     dedupKey = dedupKey, reference = reference, institution = institution, direction = direction,
     amountMinor = amountMinor, balanceMinor = balanceMinor, feeMinor = feeMinor, currency = currency,
     counterparty = counterparty, referenceHint = referenceHint, occurredAt = occurredAt,
     capturedAt = capturedAt, category = category, person = person, notes = notes, needsReview = needsReview,
+    cashMove = cashMove,
 )
 
 fun RuleEntity.toDto() = RuleDto(counterparty, direction, category, person, matchType, priority, enabled)
@@ -114,18 +133,25 @@ fun RuleDto.toEntity() = RuleEntity(
     matchType = matchType, priority = priority, enabled = enabled, lastMatchedAtMillis = null,
 )
 
-fun CategoryEntity.toDto() = CategoryDto(name, position, enabled, kind)
+fun CategoryEntity.toDto() = CategoryDto(name, position, enabled, kind, favorite)
 
 fun CategoryDto.toEntity() =
-    CategoryEntity(name = name, position = position, enabled = enabled, kind = kind)
+    CategoryEntity(name = name, position = position, enabled = enabled, kind = kind, favorite = favorite)
+
+fun BudgetEntity.toDto() = BudgetDto(category, limitMinor, updatedAt)
+
+fun BudgetDto.toEntity() = BudgetEntity(
+    category = category,
+    limitMinor = limitMinor,
+    updatedAt = updatedAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+)
 
 /**
- * [names] are the account's aliases, which live in their own table.
+ * [names] are the account's names, which live in their own table.
  *
- * The row id is deliberately not serialised — it is local to one database, and a
- * restore resolves the owning wallet by (key, provider) instead. "Not sure which
- * provider" travels as null so files written before wallets were distinguished
- * by provider still restore.
+ * The row id isn't saved, because it only means something in one database. A
+ * restore finds the wallet by number and provider instead. "Not sure which
+ * provider" is saved as null, so older files still restore.
  */
 fun OwnAccountEntity.toDto(names: List<String>) = OwnAccountDto(
     key = key, identifier = identifier, label = label, addedAt = addedAt,
@@ -138,7 +164,7 @@ fun OwnAccountDto.toEntity(id: Long = 0) = OwnAccountEntity(
     institution = institution ?: OwnAccountEntity.ANY_PROVIDER,
 )
 
-/** Rebuilds this account's alias rows, dropping any that don't normalise. */
+/** Rebuilds this account's name rows, dropping any that are empty once normalised. */
 fun OwnAccountDto.toNameEntities(accountId: Long): List<OwnAccountNameEntity> = names.mapNotNull { raw ->
     OwnAccountMatcher.normaliseName(raw)?.let {
         OwnAccountNameEntity(name = it, accountId = accountId, display = raw.trim())

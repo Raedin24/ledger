@@ -1,14 +1,14 @@
 package com.ledger.domain.model
 
 /**
- * Direction of money movement relative to the user's account.
+ * Which way money moved, from the user's point of view.
  *
- * DEBIT  = money leaving the account (an expense / outgoing transfer).
- * CREDIT = money entering the account (income / incoming transfer).
+ * DEBIT is money leaving the account (spending or a transfer out).
+ * CREDIT is money arriving (income or a transfer in).
  *
- * Direction is a first-class part of a categorization rule key, not merely an
- * output: the same counterparty can be both a gift recipient (DEBIT) and a
- * reimbursement source (CREDIT). See CategorizationEngine.
+ * Direction is part of what a categorisation rule matches on. The same
+ * counterparty can be a gift recipient (DEBIT) and a source of repayment
+ * (CREDIT). See CategorizationEngine.
  */
 enum class Direction {
     DEBIT,
@@ -16,9 +16,9 @@ enum class Direction {
 
     companion object {
         /**
-         * Normalises the many textual markers telcos/banks use for direction.
-         * Returns null if the token is not a recognised direction marker, which
-         * lets the validator reject a message rather than guessing.
+         * Turns the many direction markers providers use into a Direction. Returns
+         * null for an unknown marker, so the validator can reject the message instead
+         * of guessing.
          */
         fun fromMarker(raw: String): Direction? = when (raw.trim().uppercase()) {
             "DR", "DEBIT", "DEBITED", "PAYMENT", "SENT", "WITHDRAWAL", "-" -> DEBIT

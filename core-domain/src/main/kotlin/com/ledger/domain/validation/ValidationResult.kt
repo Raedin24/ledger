@@ -1,19 +1,19 @@
 package com.ledger.domain.validation
 
 sealed interface ValidationResult {
-    /** All required transaction fields present — safe to persist. */
+    /** Every required field is present, so it is safe to save. */
     data object Valid : ValidationResult
 
     /**
-     * Structurally NOT a transaction (no currency amount, or nothing but a bare
-     * code). This is the branch OTPs and marketing texts fall into. Discard.
+     * Not a transaction (no currency amount, or only a bare code). OTPs and
+     * marketing messages end up here. Dropped.
      */
     data class NotTransaction(val reason: String) : ValidationResult
 
     /**
-     * Looks transaction-like (has a currency amount plus a balance or reference)
-     * but is missing a required field — likely format drift. Route to review,
-     * never auto-persist.
+     * Looks like a transaction (a currency amount plus a balance or reference) but
+     * is missing a required field, probably because the format changed. Sent to
+     * review, never saved automatically.
      */
     data class Incomplete(val reason: String) : ValidationResult
 }

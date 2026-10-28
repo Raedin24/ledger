@@ -1,5 +1,6 @@
 package com.ledger.app.data.backup
 
+import com.ledger.app.data.db.BudgetEntity
 import com.ledger.app.data.db.CategoryEntity
 import com.ledger.app.data.db.OwnAccountEntity
 import com.ledger.app.data.db.OwnAccountNameEntity
@@ -12,10 +13,10 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * Pure (framework-free) serialisation between the ledger's entities and the
- * portable export formats:
- *  - **JSON** — the full, round-trippable backup document (also the import format).
- *  - **CSV** — a flat, spreadsheet-friendly view of transactions (export only).
+ * Converts the ledger to and from the export formats. It has no Android
+ * dependencies.
+ *  - JSON: the full backup, which can also be imported.
+ *  - CSV: a flat list of transactions for spreadsheets (export only).
  */
 object LedgerTransfer {
 
@@ -33,6 +34,7 @@ object LedgerTransfer {
         categories: List<CategoryEntity>,
         ownAccounts: List<OwnAccountEntity>,
         ownAccountNames: List<OwnAccountNameEntity>,
+        budgets: List<BudgetEntity>,
     ): String {
         val namesByAccount = ownAccountNames.groupBy { it.accountId }
         return json.encodeToString(
@@ -45,6 +47,7 @@ object LedgerTransfer {
                 ownAccounts = ownAccounts.map { account ->
                     account.toDto(namesByAccount[account.id]?.map { it.display }.orEmpty())
                 },
+                budgets = budgets.map { it.toDto() },
             ),
         )
     }
@@ -78,11 +81,23 @@ object LedgerTransfer {
 
     private fun major(minor: Long): String = String.format(Locale.US, "%.2f", minor / 100.0)
 
-    /** RFC-4180-ish quoting: wrap when the value has a comma, quote, or newline. */
-    private fun csvField(value: String): String =
-        if (value.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) {
-            "\"" + value.replace("\"", "\"\"") + "\""
+    /**
+     * Quotes a CSV value when it contains a comma, quote or newline.
+     *
+     * Values a spreadsheet would treat as a formula get a leading apostrophe
+     * first. The counterparty and narration come from SMS text, which anyone can
+     * send, so a sender named "=HYPERLINK(...)" would otherwise become a live
+     * formula in Excel or Sheets. Amounts and dates never start with these
+     * characters, so they are unchanged.
+     */
+    private fun csvField(value: String): String {
+        val safe = if (value.firstOrNull() in FORMULA_LEADS) "'$value" else value
+        return if (safe.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) {
+            "\"" + safe.replace("\"", "\"\"") + "\""
         } else {
-            value
+            safe
         }
+    }
+
+    private val FORMULA_LEADS = setOf('=', '+', '-', '@', '\t', '\r')
 }

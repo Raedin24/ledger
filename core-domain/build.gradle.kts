@@ -1,6 +1,6 @@
-// Pure-Kotlin (framework-free) domain module. No Android dependencies here on
-// purpose: the capture/parse/validate/dedup/categorize logic must be unit
-// testable on the JVM without an emulator, and auditable in isolation.
+// Plain Kotlin domain module with no Android dependencies, so the capture,
+// parsing, validation, dedup and categorisation logic can be unit tested on
+// the JVM without an emulator.
 plugins {
     id("org.jetbrains.kotlin.jvm")
 }

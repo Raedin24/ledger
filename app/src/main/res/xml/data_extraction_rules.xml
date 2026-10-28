@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Android 12+ backup/transfer rules. We opt OUT of everything: the encrypted
-  Room DB and any export files must never leave the device via cloud backup or
-  device-to-device transfer. Combined with allowBackup="false" this closes the
-  Auto-Backup gap that would otherwise silently copy private storage to Google.
+  Backup and transfer rules for Android 12+. Everything is excluded: the
+  encrypted database and any exports must never leave the device through cloud
+  backup or device-to-device transfer. Together with allowBackup="false", this
+  stops Android's automatic backup from copying the app's private storage.
 -->
 <data-extraction-rules>
     <cloud-backup>

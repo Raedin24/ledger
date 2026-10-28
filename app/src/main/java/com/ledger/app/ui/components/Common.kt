@@ -29,23 +29,23 @@ import com.ledger.app.ui.theme.LedgerThemeTokens
 import java.text.NumberFormat
 import java.util.Locale
 
-/** The card silhouette, hoisted so it is allocated once rather than per row. */
+/** The card shape, created once and shared. */
 private val CardShape = RoundedCornerShape(16.dp)
 
 /**
- * Card with the mock's paper look: soft surface, 16dp radius.
+ * A card with the app's paper look: soft surface, 16dp corners.
  *
- * Draws its rounded corners with a shaped background rather than `clip`:
- * `clip` promotes every card to its own graphics layer, and a History screen
- * holds dozens at once, which was a measurable share of the scroll jank.
+ * The corners come from a shaped background instead of `clip`, because `clip`
+ * gives every card its own graphics layer, and History shows dozens at once.
  */
 @Composable
 fun LedgerCard(
     modifier: Modifier = Modifier,
     padding: PaddingValues = PaddingValues(16.dp),
-    /** Non-zero only while a card is being picked up and dragged. `shadow` does
-     *  promote a layer, which is exactly why it is off by default — one lifted
-     *  card at a time is affordable, a screenful of them is not. */
+    /**
+     * Above zero only while a card is picked up and dragged. A shadow adds a
+     * graphics layer, which is fine for one card but not a whole screen of them.
+     */
     elevation: Dp = 0.dp,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -80,11 +80,10 @@ fun SectionHeader(title: String, action: String? = null, onAction: (() -> Unit)?
     }
 }
 
-/** A round monogram avatar (initials), as used in the mock's list rows. */
+/** A round avatar showing initials, used in list rows. */
 @Composable
 fun Monogram(text: String, size: Int = 40) {
-    // Three string allocations, once per row per recomposition otherwise — and
-    // there is one of these on every transaction row in the app.
+    // Remembered, because every transaction row in the app has one of these.
     val initials = remember(text) { text.filter { it.isLetterOrDigit() }.take(2).uppercase() }
     Box(
         modifier = Modifier
@@ -102,10 +101,8 @@ fun Monogram(text: String, size: Int = 40) {
 }
 
 /**
- * [NumberFormat] is not thread-safe, so it is held per-thread rather than in a
- * plain singleton. Building a fresh one inside [formatCedis] meant allocating
- * (and parsing a locale pattern) once per amount per recomposition — several
- * hundred times a frame while scrolling History.
+ * One [NumberFormat] per thread, because NumberFormat isn't thread-safe and
+ * creating a new one for every amount is slow while scrolling.
  */
 private val cedisFormat = object : ThreadLocal<NumberFormat>() {
     override fun initialValue(): NumberFormat =
@@ -115,19 +112,19 @@ private val cedisFormat = object : ThreadLocal<NumberFormat>() {
         }
 }
 
-/** Formats minor units (pesewas) as a cedi string, e.g. 134020 -> "₵1,340.20". */
+/**
+ * Formats pesewas as cedis, for example 134020 as "₵1,340.20". A negative
+ * amount puts the sign first ("−₵45.00"), not "₵-45.00".
+ */
 fun formatCedis(minor: Long, withSymbol: Boolean = true): String {
-    val s = cedisFormat.get()!!.format(minor / 100.0)
-    return if (withSymbol) "₵$s" else s
+    val s = cedisFormat.get()!!.format(kotlin.math.abs(minor) / 100.0)
+    val sign = if (minor < 0) "−" else ""
+    return if (withSymbol) "$sign₵$s" else "$sign$s"
 }
 
 /**
- * The app's single vocabulary for which way money moved.
- *
- * Every surface routes through here: the same transaction previously read as
- * "PAYMENT" while being reviewed, "Money out" on its detail screen, and "SPENT"
- * in the dashboard totals, which made Review and History look like they
- * disagreed about the transaction itself.
+ * The one set of words the app uses for which way money moved. Every screen
+ * uses this, so a transaction is described the same way everywhere.
  */
 fun directionLabel(direction: String): String =
     if (direction == "CREDIT") MONEY_IN else MONEY_OUT
@@ -136,10 +133,9 @@ const val MONEY_IN = "Money in"
 const val MONEY_OUT = "Money out"
 
 /**
- * Friendly name for a stored [com.ledger.domain.model.Institution] value.
- * The column holds the enum name ("MTN_MOMO"), which is not what a person calls
- * their wallet. Unknown values pass through so a renamed enum degrades to
- * something readable rather than crashing.
+ * A readable name for a stored [com.ledger.domain.model.Institution] value.
+ * The column holds the enum name ("MTN_MOMO"), which isn't what people call
+ * their wallet. Unknown values are shown as they are rather than crashing.
  */
 fun institutionLabel(name: String): String =
     runCatching { com.ledger.domain.model.Institution.valueOf(name).displayName }

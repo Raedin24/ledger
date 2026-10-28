@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -57,6 +59,7 @@ import com.ledger.app.ui.components.directionLabel
 import com.ledger.app.ui.components.formatCedis
 import com.ledger.app.ui.components.institutionLabel
 import com.ledger.app.ui.components.spotlight
+import com.ledger.app.data.db.CashMove
 import com.ledger.app.ui.theme.LedgerPalette
 import com.ledger.app.ui.theme.LedgerThemeTokens
 import com.ledger.app.ui.vm.ReviewViewModel
@@ -65,8 +68,10 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-/** Full stamp: a review decision often hinges on telling two same-day
- *  transactions from the same person apart. */
+/**
+ * The full date and time, because telling apart two same-day transactions with
+ * the same person often decides how to file them.
+ */
 private val reviewStamp =
     DateTimeFormatter.ofPattern("d MMM yyyy · HH:mm").withZone(ZoneId.systemDefault())
 
@@ -76,43 +81,43 @@ fun ReviewScreen(
     vm: ReviewViewModel = hiltViewModel(),
     tutorialVm: TutorialViewModel = hiltViewModel(),
 ) {
-    // Null while the first read is still in flight; the screen must not claim
-    // "All caught up" before it knows whether anything is waiting.
+    // Null until the first read arrives, so the screen doesn't say "All caught
+    // up" before it knows whether anything is waiting.
     val queue by vm.queue.collectAsStateWithLifecycle()
     val items = queue.orEmpty()
     val loading = queue == null
     val message by vm.message.collectAsStateWithLifecycle()
     val tutorial by tutorialVm.state.collectAsStateWithLifecycle()
     val categories by vm.categories.collectAsStateWithLifecycle()
+    val olderCount by vm.olderCount.collectAsStateWithLifecycle()
+    val cleared by vm.cleared.collectAsStateWithLifecycle()
+    var clearing by remember { mutableStateOf(false) }
     val colors = LedgerThemeTokens.colors
 
-    // Beat 4 — the payoff. Only meaningful with something in the queue to sort.
+    // The guide's rule step. It needs something in the queue to point at.
     val step = TutorialStep.REVIEW_RULE
-    // "Try it" tucks the card away so the user can work, but leaves the beat
-    // open: it completes for real when the rule sweep actually fires.
-    var beat4Tucked by remember { mutableStateOf(false) }
-    val beat4Live = tutorial.showing(step) && items.isNotEmpty()
-    val showBeat4 = beat4Live && !beat4Tucked
-    // Saving with a rule is the completion moment; the sweep banner proves it.
+    // "Try it" hides the guide's card so the user can work, but the step stays
+    // open until a rule is actually created.
+    var ruleStepTucked by remember { mutableStateOf(false) }
+    val ruleStepLive = tutorial.showing(step) && items.isNotEmpty()
+    val showRuleStep = ruleStepLive && !ruleStepTucked
+    // The banner after saving with a rule means the step is done.
     LaunchedEffect(message) { if (message != null && tutorial.showing(step)) tutorialVm.complete(step) }
-    // Nothing to sort means this beat has no anchor and nothing to demonstrate.
-    // Step past it rather than parking the guide on an empty screen — but only
-    // once the queue is actually known to be empty, not merely unread.
+    // With nothing to sort, the step has nothing to point at, so skip it. Wait
+    // until the queue is known to be empty, not just not loaded yet.
     LaunchedEffect(loading, items.isEmpty(), tutorial.current) {
         if (tutorial.showing(step) && !loading && items.isEmpty()) tutorialVm.skip(step)
     }
 
-    // The control beat 4 teaches is the rule switch, which sits near the bottom of
-    // a card half a screen tall — so it starts out below the fold *and* behind the
-    // coach-mark. Scrolling to the card's item index isn't enough (that puts the
-    // card's top at the viewport top and the switch off the bottom), so the row
-    // asks to be brought into view itself, with a rect padded by the coach-mark's
-    // footprint so the scroll clears it rather than tucking the row underneath.
+    // The rule step points at the rule switch, near the bottom of a tall card,
+    // so it starts below the fold and behind the guide's card. Scrolling to the
+    // card's position isn't enough, so the switch's row asks to be brought into
+    // view, with extra space so it isn't hidden under the guide's card.
     val ruleRow = remember { BringIntoViewRequester() }
-    val coachReservePx = with(LocalDensity.current) { BEAT4_RESERVE.toPx() }
-    LaunchedEffect(showBeat4, items.firstOrNull()?.id) {
-        if (!showBeat4) return@LaunchedEffect
-        // One frame so the card is composed and positioned before we ask.
+    val coachReservePx = with(LocalDensity.current) { RULE_STEP_RESERVE.toPx() }
+    LaunchedEffect(showRuleStep, items.firstOrNull()?.id) {
+        if (!showRuleStep) return@LaunchedEffect
+        // Wait one frame so the card has been laid out.
         withFrameNanos { }
         ruleRow.bringIntoView(Rect(0f, 0f, 1f, coachReservePx))
     }
@@ -129,17 +134,29 @@ fun ReviewScreen(
                 when {
                     loading -> "Checking what's waiting…"
                     items.isEmpty() -> "All caught up"
-                    else -> "${items.size} to review · new senders waiting to be sorted"
+                    else -> "${items.size} to review"
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.inkMuted,
             )
+            if (items.isNotEmpty()) {
+                Text(
+                    "Clear queue",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.gold,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clickable { clearing = true }.padding(top = 6.dp, bottom = 2.dp),
+                )
+            }
         }
 
-        // A new rule sweeps the rest of the backlog from that sender — say so,
-        // otherwise the queue just shrinks unexplained.
+        // A new rule also sorts the sender's other queued rows. Say so, or the
+        // queue shrinks with no explanation.
         message?.let { text ->
             item { RuleSweepBanner(text, onDismiss = vm::clearMessage) }
+        }
+        cleared?.let { text ->
+            item { RuleSweepBanner(text, onDismiss = vm::clearClearedMessage) }
         }
         if (loading) {
             item { ReviewSkeleton(Modifier.padding(top = 4.dp)) }
@@ -147,14 +164,14 @@ fun ReviewScreen(
             item {
                 EmptyState(
                     title = "All caught up",
-                    message = "Nothing waiting. New unrecognised transactions will appear here.",
+                    message = "Nothing to sort.",
                     modifier = Modifier.padding(top = 40.dp),
                     illustration = { CheckCircleIllustration() },
                 )
             }
         } else {
             items(items, key = { it.id }, contentType = { "review-card" }) { txn ->
-                val spotlit = beat4Live && txn.id == items.first().id
+                val spotlit = ruleStepLive && txn.id == items.first().id
                 ReviewCard(
                     txn = txn,
                     vm = vm,
@@ -164,12 +181,21 @@ fun ReviewScreen(
                 )
             }
         }
-        item { Spacer(Modifier.height(if (showBeat4) BEAT4_RESERVE else 90.dp)) }
+        item { Spacer(Modifier.height(if (showRuleStep) RULE_STEP_RESERVE else 90.dp)) }
     }
 
-        CoachScrim(showBeat4)
+        if (clearing) {
+            ClearQueueDialog(
+                total = items.size,
+                older = olderCount,
+                onClear = { olderOnly -> clearing = false; vm.clearQueue(olderOnly) },
+                onDismiss = { clearing = false },
+            )
+        }
+
+        CoachScrim(showRuleStep)
         CoachMarkHost(
-            visible = showBeat4,
+            visible = showRuleStep,
             modifier = Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
         ) {
             CoachMark(
@@ -177,7 +203,7 @@ fun ReviewScreen(
                 title = step.title,
                 body = step.body,
                 primaryLabel = step.primary,
-                onPrimary = { beat4Tucked = true },
+                onPrimary = { ruleStepTucked = true },
                 secondaryLabel = step.secondary,
                 onSecondary = { tutorialVm.skip(step) },
                 onDismiss = tutorialVm::dismiss,
@@ -187,6 +213,46 @@ fun ReviewScreen(
             )
         }
     }
+}
+
+/**
+ * Clears the backlog an inbox import leaves behind. "Older only" is offered
+ * first, since this month's rows are still worth sorting.
+ */
+@Composable
+private fun ClearQueueDialog(total: Int, older: Int, onClear: (olderOnly: Boolean) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = LedgerPalette.Surface,
+        title = { Text("Clear the review queue?", style = MaterialTheme.typography.titleLarge) },
+        text = {
+            Column {
+                Text(
+                    "Cleared items stay in History, uncategorised.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = LedgerPalette.InkSoft,
+                )
+                Spacer(Modifier.height(10.dp))
+                if (older > 0) {
+                    ClearChoice("Before this month ($older)") { onClear(true) }
+                }
+                ClearChoice("Everything ($total)") { onClear(false) }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = LedgerPalette.InkMuted) } },
+    )
+}
+
+@Composable
+private fun ClearChoice(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        style = MaterialTheme.typography.titleMedium,
+        color = LedgerPalette.Gold,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
+    )
 }
 
 @Composable
@@ -210,29 +276,27 @@ private fun RuleSweepBanner(text: String, onDismiss: () -> Unit) {
 private fun ReviewCard(
     txn: TransactionEntity,
     vm: ReviewViewModel,
-    // Collected once by the screen and passed down: every card reads the same
-    // flow, and a collector per card meant N subscriptions to one StateFlow.
+    // Collected once by the screen and passed down, instead of every card
+    // subscribing on its own.
     categories: CategoryOptions,
     spotlightRule: Boolean = false,
-    /** Set only on the card beat 4 is pointing at, so the guide can scroll its
-     *  rule switch into view. Null on every other card. */
+    /**
+     * Set only on the card the guide's rule step points at, so the guide can
+     * scroll its rule switch into view. Null on every other card.
+     */
     ruleRowRequester: BringIntoViewRequester? = null,
 ) {
     val colors = LedgerThemeTokens.colors
     var selected by remember { mutableStateOf<String?>(null) }
     var person by remember { mutableStateOf(txn.person ?: "") }
     var note by remember { mutableStateOf("") }
-    // Off by default. Creating a standing rule is a bigger commitment than
-    // filing one transaction — it silently sorts everything that sender sends
-    // from then on — so it should be something the user reaches for, not
-    // something that happens because they didn't notice a switch.
+    // Off by default. A rule files everything this sender sends from now on,
+    // so it should be something the user chooses, not something they miss.
     var alwaysRule by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf(false) }
 
-    // Both format a string; the stamp also parses a pattern and reads the zone.
-    // Keyed to the row's own data so a card recomputes when it's reused but not
-    // once per recomposition — a card recomposes on every keystroke in its two
-    // fields, and this was running for both of them.
+    // Keyed to the row's data, so it is formatted once per row and not again
+    // on every keystroke in the card's fields.
     val stamp = remember(txn.institution, txn.occurredAt) {
         "${institutionLabel(txn.institution)} · ${reviewStamp.format(Instant.ofEpochMilli(txn.occurredAt))}"
     }
@@ -241,8 +305,8 @@ private fun ReviewCard(
     }
 
     LedgerCard {
-        // Parsed details header. The amount is laid out first and never shrinks —
-        // a long counterparty ellipsises instead of pushing the figure off-screen.
+        // The amount comes first and never shrinks. A long counterparty is cut
+        // short instead of pushing the amount off the screen.
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -263,18 +327,24 @@ private fun ReviewCard(
                 softWrap = false,
             )
         }
-        // Which wallet this landed in, and when. Without these two facts the same
-        // counterparty appearing twice — once per account, or twice on one day —
-        // is impossible to tell apart from the History row you're comparing it to.
+        // Which wallet and when. Without these, the same counterparty appearing
+        // twice (once per wallet, or twice in a day) is hard to tell apart.
         Text(
             stamp,
             style = MaterialTheme.typography.labelSmall,
             color = colors.inkMuted,
             modifier = Modifier.padding(top = 3.dp),
         )
+        if (txn.cashMove == CashMove.OFFER) {
+            Spacer(Modifier.height(10.dp))
+            CashMovePrompt(
+                direction = txn.direction,
+                onMove = { vm.moveToCash(txn) },
+                onKeep = { vm.keepOutOfCash(txn) },
+            )
+        }
         Spacer(Modifier.height(4.dp))
-        // The parsed facts are worth copying out (a reference to paste into a
-        // dispute, an amount to check), so this block is selectable.
+        // Selectable, so the user can copy a reference or an amount.
         SelectionContainer {
             Column {
                 DetailRow("Direction", directionLabel(txn.direction))
@@ -291,21 +361,20 @@ private fun ReviewCard(
             color = colors.inkSoft,
         )
         Spacer(Modifier.height(8.dp))
-        // Only this direction's labels: a credit is never "Rent", a debit never
-        // "Salary". Capped at QUICK_PICKS because the full set runs to twenty-odd
-        // and laying every chip out in every queued card was the single heaviest
-        // thing on this screen; the rest are one tap away.
+        // Only categories for this direction: money in is never "Rent", money out
+        // never "Salary". The user's favourites show as chips; the rest are behind
+        // "More".
         val offered = categories.forDirection(txn.direction)
-        val quick = remember(offered, selected) {
-            val head = offered.take(QUICK_PICKS)
-            // Keep a choice made from the dialog visible, or it reads as unset.
+        val quick = remember(categories, txn.direction, selected) {
+            val head = categories.quickForDirection(txn.direction)
+            // Keep a choice made from the sheet visible, or it looks unset.
             if (selected != null && selected !in head) head + selected!! else head
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             quick.forEach { cat ->
                 CategoryChip(cat, cat == selected, colors.gold) { selected = cat }
             }
-            if (offered.size > QUICK_PICKS) {
+            if (offered.any { it !in quick }) {
                 CategoryChip("More…", active = false, accent = colors.gold) { picking = true }
             }
         }
@@ -322,7 +391,7 @@ private fun ReviewCard(
         Spacer(Modifier.height(12.dp))
         LabeledField("Person", person, "Who was this with?") { person = it }
         Spacer(Modifier.height(8.dp))
-        LabeledField("Your note", note, "Optional context, searchable later") { note = it }
+        LabeledField("Your note", note, "Optional") { note = it }
 
         Spacer(Modifier.height(12.dp))
         Row(
@@ -336,10 +405,11 @@ private fun ReviewCard(
                 .padding(if (spotlightRule) 8.dp else 0.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
-                Text("Always sort this sender this way", style = MaterialTheme.typography.titleMedium)
-                Text("Creates a rule so it's automatic next time", style = MaterialTheme.typography.labelSmall, color = colors.inkMuted)
-            }
+            Text(
+                "Always sort this sender this way",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
             Switch(checked = alwaysRule, onCheckedChange = { alwaysRule = it })
         }
 
@@ -375,15 +445,11 @@ private fun DetailRow(label: String, value: String) {
     }
 }
 
-/** How many category chips a card lays out inline before deferring to the
- *  picker. Enough to cover the everyday cases without paying to measure the
- *  whole set in every queued card. */
-private const val QUICK_PICKS = 8
-
-/** Space kept clear at the bottom of the list for beat 4's coach-mark, and the
- *  amount the spotlit row is scrolled clear of it by. One constant so the two
- *  can't drift apart. */
-private val BEAT4_RESERVE = 220.dp
+/**
+ * Space kept free at the bottom of the list for the guide's card during the
+ * rule step. The rule switch is scrolled clear of it by the same amount.
+ */
+private val RULE_STEP_RESERVE = 220.dp
 
 private val ChipShape = RoundedCornerShape(11.dp)
 private val RuleRowShape = RoundedCornerShape(12.dp)
@@ -392,10 +458,8 @@ private val BannerShape = RoundedCornerShape(12.dp)
 
 @Composable
 private fun CategoryChip(label: String, active: Boolean, accent: Color, onClick: () -> Unit) {
-    // background(colour, shape) rather than clip(shape).background(colour): same
-    // rounded rect, one fewer render layer per chip, and a queued card carries nine.
-    // Measured as a wash on this device — kept because it's the cheaper form, not
-    // because it fixed anything.
+    // background(colour, shape) draws the same rounded shape as
+    // clip(shape).background(colour), with one less layer per chip.
     Box(
         Modifier
             .background(if (active) accent else LedgerThemeTokens.colors.surfaceSunken, ChipShape)
@@ -415,8 +479,7 @@ private fun LabeledField(label: String, value: String, placeholder: String, onCh
     Column {
         Text(label, style = MaterialTheme.typography.labelSmall, color = LedgerThemeTokens.colors.inkMuted)
         Spacer(Modifier.height(4.dp))
-        // PlainField, not Material3's TextField — see its doc comment. Two of these
-        // per queued card was the bulk of the cost of scrolling this screen.
+        // PlainField rather than Material3's TextField; see PlainField's doc comment.
         PlainField(value, onChange, placeholder, Modifier.fillMaxWidth())
     }
 }

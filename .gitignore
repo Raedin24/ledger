@@ -1,6 +1,7 @@
 # Android / Gradle / IntelliJ
 *.iml
 .gradle/
+.kotlin/
 .idea/
 .DS_Store
 /build
@@ -10,9 +11,9 @@
 .cxx
 local.properties
 
-# Signing material. The keystore and its passwords never enter the repo — losing
-# the key is unrecoverable (Android refuses to update an app whose signature
-# changed), and leaking it lets anyone ship a build that impersonates this one.
+# Signing material. The keystore and its passwords never go in the repo. A lost
+# key can't be replaced (Android won't update an app whose signature changed),
+# and a leaked one would let anyone sign a build that passes as this one.
 /keystore.properties
 *.jks
 *.keystore
@@ -23,20 +24,8 @@ local.properties
 *.db
 *.db-*
 
-# Working notes and planning trackers. Kept locally; the READMEs carry the
-# published account of what the project is and what is still open.
-/expense-tracker-app-decisions.md
-/PROJECT_ROADMAP.md
-/REMAINING_WORK.md
-
-# Local tooling artefacts, not part of the app
-/index.html
-/script.js
-/styles.css
-/*.logcat
-/ledger_mobsf_report.pdf
+# Local files that aren't part of the project: notes, reports, logs and
+# design files.
+/local/
+*.logcat
 .claude/
-
-# Design mock the palette and type scale were taken from. Kept locally; the
-# values themselves live in ui/theme/.
-/Ledger - Finance Tracker.html

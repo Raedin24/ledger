@@ -7,10 +7,9 @@ import com.ledger.domain.model.Transaction
 import java.time.Instant
 
 /**
- * Whatever partial fields the parser managed to pull from a message that did
- * NOT fully satisfy the strict template. Used only to populate the
- * "needs attention" queue for format-drift review. Deliberately holds no raw
- * SMS body — just the discrete fields plus sender/time context.
+ * The fields the parser could read from a message that didn't fully match the
+ * strict template. Used only to fill the review queue. It holds no SMS text,
+ * just the separate fields plus the sender and time.
  */
 data class PartialFields(
     val direction: Direction?,
@@ -22,26 +21,26 @@ data class PartialFields(
 )
 
 /**
- * Outcome of parsing a single inbound SMS. Exhaustive by design so the caller
- * must consciously handle each case.
+ * The result of parsing one SMS. It is a sealed type, so callers have to
+ * handle every case.
  */
 sealed interface ParseResult {
 
-    /** Sender is not in scope at all — silently ignored, nothing recorded. */
+    /** Not from a supported provider. Ignored, and nothing is recorded. */
     data class Ignored(val senderId: String, val reason: String) : ParseResult
 
     /**
-     * Sender is in scope but the message is not transaction-like (e.g. an OTP,
-     * a marketing blast, a balance-enquiry reply). Discarded with no partial
-     * fields — this is the branch that guarantees OTPs never surface anywhere.
+     * From a supported provider, but not a transaction (an OTP, a marketing
+     * message, a balance reply). Dropped without keeping any fields. This is the
+     * branch that keeps OTPs out of the app.
      */
     data class Discarded(val institution: Institution, val reason: String) : ParseResult
 
     /**
-     * Sender is in scope and the message looks like a transaction (carries a
-     * currency amount plus a balance or reference) but did NOT fully satisfy
-     * the strict template. Routed to the review queue to catch format drift
-     * without weakening the OTP guarantee.
+     * From a supported provider and looks like a transaction (a currency amount
+     * plus a balance or reference), but didn't fully match the strict template.
+     * Sent to the review queue, so format changes are caught without weakening
+     * the OTP rule.
      */
     data class NeedsAttention(
         val institution: Institution,
@@ -50,6 +49,6 @@ sealed interface ParseResult {
         val reason: String,
     ) : ParseResult
 
-    /** Strict template fully matched — a real transaction was extracted. */
+    /** The strict template matched, and a transaction was read. */
     data class Parsed(val transaction: Transaction) : ParseResult
 }

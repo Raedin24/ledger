@@ -2,17 +2,18 @@ package com.ledger.domain.parser
 
 import com.ledger.domain.model.Direction
 import com.ledger.domain.model.Institution
+import com.ledger.domain.model.Money
 import com.ledger.domain.model.Transaction
 import com.ledger.domain.validation.TransactionValidator
 import com.ledger.domain.validation.ValidationResult
 
 /**
- * Turns a transient inbound SMS into a [ParseResult].
+ * Turns an incoming SMS into a [ParseResult].
  *
- * Pipeline: sender scoping -> field extraction -> strict validation. The parser
- * itself makes no privacy-relevant decisions beyond never retaining the body;
- * the OTP guarantee lives entirely in [TransactionValidator], which the parser
- * consults to classify the extracted fields.
+ * The steps are: check the sender, extract the fields, then validate them
+ * strictly. The parser never keeps the message text. The rule that keeps OTPs
+ * out lives in [TransactionValidator], which the parser uses to classify the
+ * fields.
  */
 class SmsParser(
     private val validator: TransactionValidator = TransactionValidator(),
@@ -20,22 +21,12 @@ class SmsParser(
 ) {
 
     /**
-     * @param allowList institutions enabled for capture. Passed per call rather
-     *  than held on the parser because the set changes while the app runs and
-     *  the parser is a singleton — a constructor argument would freeze whatever
-     *  was enabled at process start.
-     *
-     *  An empty set means "all recognised institutions". Onboarding can be
-     *  skipped, so treating empty as "none" would leave capture silently dead
-     *  for anyone who skipped it.
+     * Every supported provider is captured. There is no per-user list: a provider
+     * is supported once its template has been tested against real messages.
      */
-    fun parse(sms: IncomingSms, allowList: Set<Institution> = emptySet()): ParseResult {
+    fun parse(sms: IncomingSms): ParseResult {
         val institution = Institution.fromSenderId(sms.senderId)
             ?: return ParseResult.Ignored(sms.senderId, "sender not a recognised institution")
-
-        if (allowList.isNotEmpty() && institution !in allowList) {
-            return ParseResult.Ignored(sms.senderId, "institution not enabled by user")
-        }
 
         val template = SenderTemplate.forInstitution(institution)
             ?: return ParseResult.Ignored(sms.senderId, "no template for institution")
@@ -58,6 +49,11 @@ class SmsParser(
             referenceHint = referenceHint,
         )
 
+        // The validator doesn't see the fee, so apply the same ceiling here.
+        if (!Money.withinCeiling(fee?.value)) {
+            return ParseResult.Discarded(institution, "fee beyond any wallet limit")
+        }
+
         return when (val v = validator.validate(partial, hasCurrencyAmount = FieldExtractors.hasCurrencyAmount(body))) {
             is ValidationResult.NotTransaction ->
                 ParseResult.Discarded(institution, v.reason)
@@ -76,35 +72,31 @@ class SmsParser(
                     currency = defaultCurrency,
                     counterparty = partial.counterparty,
                     referenceHint = partial.referenceHint,
-                    occurredAt = sms.receivedAt, // TODO(phase0): parse in-body timestamp when present
+                    occurredAt = sms.receivedAt,  // TODO: use the time in the message body when there is one
                     capturedAt = sms.receivedAt,
+                    cashMovement = template.isCashMovement(body, partial.direction!!),
                 )
             )
         }
     }
 
     /**
-     * Who the money actually moved to or from.
+     * Who the money moved to or from.
      *
-     * The preposition capture is the general case, but three real shapes defeat
-     * it, and all three are common enough that leaving them produces a ledger
-     * full of "Unknown sender" and duplicate gateway names:
+     * Usually this is the name after a preposition ("to", "from"). Three common
+     * message shapes need special handling:
      *
-     *  - **A refund names its source before the verb**, not after a preposition.
-     *    This one is checked *first*, because the prepositions don't merely miss
-     *    it, they actively mislead: MTN's refund alert ends "Message from
-     *    refunder: .", so scanning for "from" on a credit yields the word
-     *    "refunder" as the counterparty.
-     *  - **A gateway stands in for the person.** MTN addresses a cross-network
-     *    send to "TELECEL PUSH" / "TIGO PUSH" and prints the real recipient in
-     *    the narration. The narration wins, or every off-network payment the user
-     *    ever makes shares one of two counterparties.
-     *  - **A bank hides behind a masked account.** "from: 1441****123 , Ecobank"
-     *    — the mask is not name-shaped, so the ordinary capture returns nothing.
+     *  - A refund names its source before the verb. This is checked first,
+     *    because MTN's refund alert ends "Message from refunder: .", and looking
+     *    for "from" would give "refunder".
+     *  - A gateway stands in for the person. MTN addresses a cross-network send to
+     *    "TELECEL PUSH" or "TIGO PUSH" and puts the real recipient in the
+     *    narration, so the narration is used instead.
+     *  - A bank sits behind a masked account ("from: 1441****123 , Ecobank"), so
+     *    the bank's name is used.
      *
-     * The narration is only consulted to *replace a gateway*, never to override a
-     * real counterparty, so an ordinary transfer that happens to carry a name in
-     * its reference is untouched.
+     * The narration only ever replaces a gateway name. It never overrides a real
+     * counterparty.
      */
     private fun resolveCounterparty(
         body: String,
@@ -123,5 +115,12 @@ class SmsParser(
         return direct
             ?: FieldExtractors.maskedSourceName(body)
             ?: FieldExtractors.phone(body)
+            // Buying data or airtime from the provider has no third party, so the
+            // provider is named as the merchant. That keeps these out of the review
+            // queue and gives a rule something stable to match. It comes last, so an
+            // airtime top-up for a number keeps that number.
+            ?: template.institution.displayName.takeIf {
+                FieldExtractors.isSelfServicePurchase(body)
+            }
     }
 }

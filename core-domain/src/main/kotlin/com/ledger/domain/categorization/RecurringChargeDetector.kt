@@ -4,12 +4,11 @@ import com.ledger.domain.model.Transaction
 import java.time.Duration
 
 /**
- * Amount-recurrence heuristic: same counterparty + same amount + same direction
- * appearing on a roughly regular cadence looks like a subscription/recurring
- * charge. Flags it for a "looks like a recurring charge — confirm?" prompt
- * rather than relying on the user to notice.
+ * Spots likely recurring charges: the same counterparty, amount and direction
+ * appearing at roughly regular intervals, like a subscription. Meant to drive
+ * a "looks like a recurring charge, confirm?" prompt.
  *
- * Pure function over history; no persistence.
+ * Not used by any screen yet. It works over history and stores nothing.
  */
 class RecurringChargeDetector(
     private val minOccurrences: Int = 3,

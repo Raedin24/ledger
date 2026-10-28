@@ -1,12 +1,9 @@
 package com.ledger.app.data.db
 
 /**
- * Which side of the ledger a category belongs to.
- *
- * Money in and money out want genuinely different labels — "Rent" is never
- * income and "Salary" is never a spend — so a single flat list meant every
- * picker was mostly wrong for whichever direction was being sorted. [SHARED] is
- * for the handful that legitimately go both ways.
+ * Which side of the ledger a category belongs to. Money in and money out need
+ * different labels ("Rent" is never income, "Salary" is never spending).
+ * [SHARED] is for the few that work both ways.
  */
 enum class CategoryKind(val label: String) {
     OUT("Money out"),
@@ -15,19 +12,15 @@ enum class CategoryKind(val label: String) {
     ;
 
     companion object {
-        /** Tolerant parse — an unknown value degrades to spending rather than
-         *  disappearing from every picker. */
+        /** An unknown value becomes money out, so the category still shows somewhere. */
         fun from(raw: String?): CategoryKind = entries.firstOrNull { it.name == raw } ?: OUT
 
         /**
-         * The order the sides are laid out in, everywhere: out, both, in.
+         * The order the sides are shown in: out, both, in.
          *
-         * Not [entries] order, which is the order the constants happen to be
-         * declared. [SHARED] belongs between the two it spans — both because
-         * that's how the editor groups its sections, and because stored position
-         * is what splits the pickers, so a shared label sorted after the income
-         * block would land at the bottom of the spending list rather than
-         * alongside the spending labels it sits with.
+         * [SHARED] sits between the other two. The editor groups sections this way,
+         * and stored positions decide what the pickers show, so a shared category
+         * stays next to the spending ones instead of falling below the income ones.
          */
         val DISPLAY_ORDER: List<CategoryKind> = listOf(OUT, SHARED, IN)
     }
@@ -37,36 +30,28 @@ enum class CategoryKind(val label: String) {
 data class DefaultCategory(val name: String, val kind: CategoryKind)
 
 /**
- * The starting category set, in display order: what money goes out on, the one
- * label that spans both directions, then where money comes in from.
- *
- * Order here is the order the pickers show, so it is grouped by kind and roughly
- * by how often each is likely to be reached for — not alphabetised.
+ * The starting categories in display order: spending, the one shared label,
+ * then income. Within each side they are ordered by how often they are likely
+ * to be used, not alphabetically.
  */
 object DefaultCategories {
 
-    /** Where recognised own-account movements are filed. Must stay in [ALL] so it
-     *  has a visual identity out of the box. */
+    /** Where own-account transfers are filed. Must stay in [ALL] so it has an icon and colour. */
     const val TRANSFERS = "Transfers"
 
-    /** The spending catch-all. Paired with [INCOME_CATCH_ALL] — before the split
-     *  a single "Other" served both, which is why the 4→5 migration has to pick
-     *  one side for it. */
+    /** The spending catch-all. [INCOME_CATCH_ALL] is the income one. */
     const val SPEND_CATCH_ALL = "Misc"
     const val INCOME_CATCH_ALL = "Other"
 
     /**
-     * Where provider charges are pooled in the breakdowns.
+     * The row that groups provider fees in the breakdowns.
      *
-     * Deliberately **not** in [ALL], so it is never seeded, never offered by a
-     * picker, and never appears in the category editor to be renamed, reordered,
-     * hidden or deleted. It exists only as a computed row: the fee column already
-     * says which transactions were charged, so there is nothing here for the user
-     * to file or maintain.
+     * It is not in [ALL], so it is never seeded, never offered by a picker, and
+     * never shown in the category editor. It is only ever computed from the fee
+     * column.
      *
-     * Kept in step by hand with the literal in `CategoryDao`'s breakdown queries —
-     * Room needs a constant expression in `@Query`, so the string cannot be
-     * interpolated from here.
+     * The same text appears in `CategoryDao`'s breakdown queries. Room needs a
+     * constant in `@Query`, so keep the two in step by hand.
      */
     const val TRANSACTION_FEES = "Transaction Fees"
 
@@ -75,10 +60,11 @@ object DefaultCategories {
 
     val ALL: List<DefaultCategory> =
         spend(
-            "Food & Drink", "Groceries", "Transport", "Fuel", "Car", "Bike", "Rent",
-            "Bills & Utilities", "Data & Airtime", "Health", "Personal Care", "Family",
-            "Gifts & Donations", "Shopping", "Fitness", "Entertainment", "Debt Repayment",
-            "Savings", "Investment", SPEND_CATCH_ALL,
+            "Food & Drink", "Dining & Outings", "Groceries", "Household", "Transport",
+            "Fuel", "Car", "Bike", "Rent", "Bills & Utilities", "Data & Airtime",
+            "Health", "Personal Care", "Clothing", "Family", "Kids", "Pet Care",
+            "Gifts & Donations", "Shopping", "Fitness", "Entertainment",
+            "Debt Repayment", "Taxes", "Savings", "Investment", SPEND_CATCH_ALL,
         ) +
             listOf(DefaultCategory(TRANSFERS, CategoryKind.SHARED)) +
             income(
@@ -86,10 +72,25 @@ object DefaultCategories {
                 "Reimbursement", "Gift Received", "Family Support", INCOME_CATCH_ALL,
             )
 
-    /** Offered when sorting a debit — spending plus anything shared. */
+    /**
+     * Which version of the default list a ledger has been given. Raise it when
+     * adding defaults, and list the new names under the new number in [ADDED].
+     */
+    const val VERSION = 2
+
+    /**
+     * Defaults added after the first release, by the [VERSION] that added them.
+     * Existing ledgers get these once, at the end of their list. Only new names
+     * are added, so a default the user deleted earlier doesn't come back.
+     */
+    val ADDED: Map<Int, List<String>> = mapOf(
+        2 to listOf("Dining & Outings", "Household", "Clothing", "Kids", "Pet Care", "Taxes"),
+    )
+
+    /** Offered when sorting a debit: spending plus shared. */
     val OUT_NAMES: List<String> = ALL.filter { it.kind != CategoryKind.IN }.map { it.name }
 
-    /** Offered when sorting a credit — income plus anything shared. */
+    /** Offered when sorting a credit: income plus shared. */
     val IN_NAMES: List<String> = ALL.filter { it.kind != CategoryKind.OUT }.map { it.name }
 
     /** Rows for a first-run seed, positioned in declaration order. */
@@ -98,13 +99,9 @@ object DefaultCategories {
     }
 
     /**
-     * What the setup shortlist starts with ticked.
-     *
-     * Not a guess at this user — nothing is known about them yet — but the labels
-     * almost every ledger ends up needing: the everyday spends, the one that
-     * covers salary, and both catch-alls, so there is always somewhere to file a
-     * transaction that fits nothing else. Everything left over is one tap away on
-     * the same screen, and one switch away afterwards.
+     * The categories ticked by default on the setup screen. They are the ones
+     * almost everyone needs: everyday spending, salary, and both catch-alls. The
+     * rest are still available behind "More" in every picker.
      */
     val SUGGESTED: Set<String> = setOf(
         "Food & Drink", "Groceries", "Transport", "Rent", "Bills & Utilities",
@@ -115,21 +112,41 @@ object DefaultCategories {
 }
 
 /**
- * The labels a picker should offer, already split by direction.
- *
- * Built once per category-table change rather than filtered at each call site,
- * so a screen showing one card per queued transaction isn't re-partitioning the
- * whole set on every recomposition.
+ * The categories a picker should offer, already split by direction. Built once
+ * when the table changes, so screens don't re-split the list on every redraw.
  */
 data class CategoryOptions(
     val spending: List<String> = DefaultCategories.OUT_NAMES,
     val income: List<String> = DefaultCategories.IN_NAMES,
+    /** The user's top spending categories, in order. Pickers show these first. */
+    val quickSpending: List<String> = emptyList(),
+    /** The user's top income labels, in order. */
+    val quickIncome: List<String> = emptyList(),
 ) {
-    /** Every label, for the pickers that span a mixed selection (History's
-     *  filters, the rule editor, a bulk re-categorise). */
+    /**
+     * Every category, for pickers that cover both directions (History filters,
+     * the rule editor, bulk re-categorise).
+     */
     val all: List<String> = spending + income.filterNot { it in spending }
 
     /** @param direction a stored [com.ledger.domain.model.Direction] name. */
     fun forDirection(direction: String): List<String> =
         if (direction == "CREDIT") income else spending
+
+    /**
+     * The categories shown without opening the picker sheet.
+     *
+     * Uses the user's favourites, or the top of the list if they haven't picked
+     * any. Either way it is capped at [INLINE_LIMIT], because each queued Review
+     * card shows these chips and too many make the screen slow.
+     */
+    fun quickForDirection(direction: String): List<String> {
+        val quick = if (direction == "CREDIT") quickIncome else quickSpending
+        return quick.ifEmpty { forDirection(direction) }.take(INLINE_LIMIT)
+    }
+
+    companion object {
+        /** How many labels a picker offers inline before deferring to "More". */
+        const val INLINE_LIMIT = 8
+    }
 }

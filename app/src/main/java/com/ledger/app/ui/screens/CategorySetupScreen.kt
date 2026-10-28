@@ -5,7 +5,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -41,17 +40,15 @@ import com.ledger.app.ui.theme.LedgerPalette
 import com.ledger.app.ui.vm.CategorySetupViewModel
 
 /**
- * "Which of these do you actually use?" — offered once, after the first sender is
- * added, and reachable from the category editor afterwards.
+ * "Which of these do you use most?" This is the first step of the setup guide,
+ * and can be opened again from the category editor.
  *
- * Chips rather than the rows the picker sheet uses: the job here is comparing a
- * whole set at a glance and tapping several, which wants density and wants the
- * eye to move in two dimensions. The picker's job is finding one known label in a
- * list, which wants a single column. Same marks, same colours, different task.
+ * Categories show as chips, not the rows the picker uses, because here the
+ * user compares the whole set and taps several. The picker is for finding one
+ * category in a list.
  *
- * Nothing here is destructive — an unpicked category is switched off, not
- * deleted — so the screen can afford to be quick rather than careful, and says so
- * rather than making the user wonder.
+ * Nothing is removed or hidden. The picked categories become the chips
+ * pickers show first, and everything else stays behind "More".
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -63,9 +60,8 @@ fun CategorySetupScreen(
     val selected by vm.selected.collectAsStateWithLifecycle()
 
     val bySide = remember(categories) { categories.groupBy { CategoryKind.from(it.kind) } }
-    // Both directions need something to offer. A side left empty falls back to
-    // the entire seeded list in the pickers, so saving it would silently do the
-    // opposite of what this screen just promised. Shared labels count for both.
+    // Both directions need at least one pick. A side left empty would fall
+    // back to the default order. Shared categories count for both.
     val ready = remember(categories, selected) {
         val picked = categories.filter { it.name in selected }
         picked.any { it.kind != CategoryKind.IN.name } && picked.any { it.kind != CategoryKind.OUT.name }
@@ -77,12 +73,10 @@ fun CategorySetupScreen(
     ) {
         item {
             Spacer(Modifier.height(24.dp))
-            Text("Pick your categories", style = MaterialTheme.typography.displayMedium)
+            Text("Pick your top categories", style = MaterialTheme.typography.displayMedium)
             Spacer(Modifier.height(6.dp))
             Text(
-                "Tap the ones you'll actually use. They go to the front of every " +
-                    "picker; the rest are switched off and can be turned back on " +
-                    "any time in Settings → Categories. Nothing is deleted.",
+                "These show first when you sort. The rest stay under \"More\".",
                 style = MaterialTheme.typography.bodyMedium,
                 color = LedgerPalette.InkMuted,
             )
@@ -115,7 +109,7 @@ fun CategorySetupScreen(
         item {
             Spacer(Modifier.height(10.dp))
             Text(
-                "Keep all ${categories.size}",
+                "Select all ${categories.size}",
                 style = MaterialTheme.typography.labelLarge,
                 color = LedgerPalette.Gold,
                 fontWeight = FontWeight.SemiBold,
@@ -150,9 +144,8 @@ fun CategorySetupScreen(
 private val ChipShape = RoundedCornerShape(20.dp)
 
 /**
- * A category as a togglable chip: its own tint when picked, flat and drained when
- * not, so the picked set reads as a block of colour rather than a set of
- * checkboxes to audit one at a time.
+ * A category as a chip that can be toggled. Picked chips show their colour and
+ * unpicked ones are plain, so the picked set stands out as a block of colour.
  */
 @Composable
 private fun ChoiceChip(category: CategoryEntity, selected: Boolean, onClick: () -> Unit) {

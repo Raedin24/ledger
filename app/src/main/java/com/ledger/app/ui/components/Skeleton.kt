@@ -28,17 +28,14 @@ import androidx.compose.ui.unit.dp
 import com.ledger.app.ui.theme.LedgerPalette
 
 /**
- * Wireframe placeholders shown while the encrypted database is still opening.
+ * Placeholder shapes shown while the encrypted database is opening.
  *
- * A cold SQLCipher open plus the first query takes long enough to notice —
- * especially straight after an SMS backfill, where the ledger is suddenly large.
- * Rendering the shape of the screen that is coming reads as loading; the
- * alternatives both lie. A bare greeting looks like a hang, and an empty state
- * ("All caught up", "Welcome to Ledger") actively contradicts what is about to
- * appear a frame later.
+ * Opening the database and running the first query takes a noticeable moment,
+ * especially after a large inbox import. Showing the shape of the coming
+ * screen reads as loading. A blank greeting would look stuck, and an empty
+ * state ("All caught up") would be wrong a moment later.
  *
- * The whole block breathes as one, rather than each bar animating on its own
- * schedule — one animation to drive, and it reads as a single surface settling.
+ * The whole block pulses together, as one animation.
  */
 @Composable
 private fun skeletonAlpha(): Float {

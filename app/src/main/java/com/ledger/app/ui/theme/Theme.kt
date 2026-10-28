@@ -44,7 +44,7 @@ fun LedgerTheme(content: @Composable () -> Unit) {
     )
 }
 
-/** Convenience accessor: `LedgerTheme.colors.income`. */
+/** Shortcut for the extra colours: `LedgerThemeTokens.colors.income`. */
 object LedgerThemeTokens {
     val colors: LedgerColors
         @Composable get() = LocalLedgerColors.current

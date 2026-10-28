@@ -25,27 +25,18 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * Calendar range picker, shared by the History window and the Breakdown period.
+ * A date range picker, shared by the History window and the Breakdown period.
  *
- * `weight(1f)` on the picker is what makes the dialog work at all. [DatePickerDialog]
- * caps its surface at 568dp and lays the buttons out after the content in a
- * `SpaceBetween` column; a [DateRangePicker] — headline, weekday row, then a
- * scrolling list of whole months — is far taller than that, so unweighted it ate
- * the entire column and Apply and Cancel were pushed past the bottom edge and
- * clipped away. They weren't merely off-screen, they were absent from the view
- * tree: a range could be chosen but never applied. Weighted, the buttons are
- * measured first and keep their space however tall the calendar wants to be.
- *
- * The mode toggle is on (M3's default; it had been switched off) because scrolling
- * is a poor way to reach a distant month — it is one row of weeks at a time, with
- * no way to jump a year. The toggle swaps the calendar for two date fields, so a
- * range spanning years is typed in a couple of seconds instead of scrolled to.
- *
- * Those fields are day-first. M3 takes the input mask from the short date pattern
- * of `LocalConfiguration`'s locale, and the phone's is en-US, which asks for
- * `MM/DD/YYYY` — an invitation to misread every date in a Ghanaian ledger. The
- * picker is handed en-GH instead, whose pattern is `dd/MM/y`. This also moves the
- * calendar's first column to Monday, which is Ghana's week start.
+ * - `weight(1f)` on the picker keeps the Apply and Cancel buttons on screen.
+ *   [DatePickerDialog] has a maximum height, and the calendar is much taller,
+ *   so without the weight the calendar takes all the space and the buttons are
+ *   left out. With it, the buttons are measured first.
+ * - The mode toggle is on. Scrolling to a distant month is slow (one row of
+ *   weeks at a time), so the toggle lets the user type the two dates instead.
+ * - The typed dates are day first. Material3 takes the date format from the
+ *   phone's locale, which is often en-US (`MM/DD/YYYY`) and easy to misread in
+ *   Ghana. The picker is given en-GH instead (`dd/MM/y`), which also starts
+ *   the week on Monday.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,7 +50,7 @@ fun DateRangeDialog(
         initialSelectedStartDateMillis = initialFrom,
         initialSelectedEndDateMillis = initialTo,
     )
-    // A start with no end is a single-day window, so Apply only needs a start.
+    // A start with no end is a single day, so Apply only needs a start.
     val canApply = state.selectedStartDateMillis != null
     val pickerColors = DatePickerDefaults.colors(containerColor = LedgerPalette.Background)
 
@@ -82,8 +73,7 @@ fun DateRangeDialog(
                     }
                 },
             ) {
-                // Tinted by hand: a flat colour would paint the disabled button in
-                // full gold and invite a tap that does nothing.
+                // Coloured by hand, so the disabled button doesn't look tappable.
                 Text(
                     "Apply",
                     color = if (canApply) LedgerPalette.Gold else LedgerPalette.InkMuted.copy(alpha = 0.4f),
@@ -97,9 +87,8 @@ fun DateRangeDialog(
             }
         },
     ) {
-        // Provided inside the dialog, not around it: Dialog hosts its own
-        // AndroidComposeView, which re-provides LocalConfiguration from its context
-        // and would discard an override made in the parent composition.
+        // Provided inside the dialog, not around it. A Dialog has its own view,
+        // which would replace an override made outside it.
         val column = this
         CompositionLocalProvider(LocalConfiguration provides ghanaian) {
         with(column) {
@@ -114,11 +103,9 @@ fun DateRangeDialog(
                 )
             },
             headline = {
-                // M3 spells both endpoints out in full — "May 28, 2026 – Jul 29,
-                // 2026" — which no longer fits on one line once the mode toggle has
-                // taken the right of a 360dp dialog, so the range wrapped and looked
-                // squeezed. The chip's own short form says the same thing in half the
-                // width and drops the year while the range sits inside this one.
+                // Material3 writes both dates out in full, which doesn't fit on one line
+                // next to the mode toggle. Use the same short form as the chip, which
+                // leaves out the year when the range is within this year.
                 val start = state.selectedStartDateMillis
                 val end = state.selectedEndDateMillis
                 Text(
@@ -140,8 +127,10 @@ fun DateRangeDialog(
     }
 }
 
-/** "12 Mar – 4 Apr" for a chosen range; years appear when the range leaves the
- *  current one. Null when the range is not fully set. */
+/**
+ * "12 Mar - 4 Apr" for a chosen range, with years shown when the range isn't
+ * within this year. Null when the range isn't fully set.
+ */
 fun customRangeLabel(from: Long?, to: Long?): String? {
     if (from == null || to == null) return null
     val zone = ZoneId.systemDefault()

@@ -4,17 +4,23 @@ import com.ledger.domain.model.Transaction
 import java.time.temporal.ChronoUnit
 
 /**
- * Idempotency guard. Duplicate SMS broadcasts (the OS can redeliver
- * `SMS_RECEIVED`) or reprocessing must never create two rows for one event.
+ * Makes sure one transaction is never saved twice, for example when Android
+ * delivers the same SMS again.
  *
- * Primary key: the provider reference number, which is globally unique per
- * transaction. When a message carries no clean reference (some loyalty/promo
- * credits, POS variants), fall back to a composite key of
- * institution + direction + amount + balance + occurred-time bucket.
+ * The key is the provider's reference number, which is unique per
+ * transaction. When a message has no clean reference (some promo credits and
+ * card payments), the key is built from provider, direction, amount, balance
+ * and a time bucket instead.
+ *
+ * This class only computes the key. The unique index on
+ * `transactions.dedupKey` decides whether it has been seen. That also handles
+ * two inserts racing each other, which a check in Kotlin couldn't.
  */
 class DuplicateDetector(
-    /** Time bucket for the composite fallback: two otherwise-identical amounts
-     *  within this window are treated as the same event. */
+    /**
+     * Time bucket for the fallback key: otherwise identical messages within this
+     * window are treated as the same transaction.
+     */
     private val fallbackWindowMinutes: Long = 3,
 ) {
 
@@ -44,24 +50,4 @@ class DuplicateDetector(
         }
     }
 
-    /**
-     * @param existingKeys keys already persisted (from a cheap indexed lookup,
-     *  NOT the full transaction table). Returns true if [txn] is a duplicate.
-     */
-    fun isDuplicate(txn: Transaction, existingKeys: Set<Key>): Boolean =
-        keyFor(txn) in existingKeys
-
-    /**
-     * Filters a batch, keeping only first-seen transactions. Handles duplicates
-     * within the batch itself as well as against [existingKeys].
-     */
-    fun deduplicate(txns: List<Transaction>, existingKeys: Set<Key> = emptySet()): List<Transaction> {
-        val seen = existingKeys.toMutableSet()
-        val out = ArrayList<Transaction>(txns.size)
-        for (t in txns) {
-            val k = keyFor(t)
-            if (seen.add(k)) out.add(t)
-        }
-        return out
-    }
 }

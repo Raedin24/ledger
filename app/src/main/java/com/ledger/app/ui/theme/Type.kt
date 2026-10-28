@@ -7,16 +7,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 /**
- * The mock pairs 'Newsreader' (serif display) with 'Public Sans' (UI/body).
+ * The design pairs Newsreader (a serif, for headings) with Public Sans (for
+ * body text).
  *
- * To keep the app fully offline (no downloadable-fonts network call), bundle the
- * TTFs and swap the families below:
+ * The fonts aren't bundled yet, so the app uses the system serif and
+ * sans-serif. To use the real fonts without a network download, add the TTFs
+ * to res/font and change the families below:
  *
  *   val Newsreader = FontFamily(Font(R.font.newsreader_regular), Font(R.font.newsreader_medium, FontWeight.Medium))
  *   val PublicSans = FontFamily(Font(R.font.public_sans_regular), ...)
- *
- * Until the TTFs are dropped into res/font, we fall back to the system serif and
- * sans-serif so the app still builds and renders in the right spirit.
  */
 val Newsreader = FontFamily.Serif
 val PublicSans = FontFamily.SansSerif

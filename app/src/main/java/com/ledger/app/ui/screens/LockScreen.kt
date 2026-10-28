@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -24,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -35,12 +35,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ledger.app.ui.theme.LedgerPalette
 import com.ledger.app.ui.theme.LedgerThemeTokens
+import kotlinx.coroutines.delay
 
 /**
- * App-open PIN lock. Shows a dot indicator + numeric keypad; auto-submits once
- * the entered digits reach the stored PIN length. When [showBiometric] is set,
- * a fingerprint key re-triggers the biometric prompt, and the prompt is fired
- * once automatically on entry.
+ * The app's PIN lock: dots and a number pad. It submits on its own once
+ * enough digits are entered. With [showBiometric], a fingerprint key opens
+ * the biometric prompt, and the prompt opens once automatically.
+ *
+ * @param lockoutRemainingMillis how long guessing is blocked, from
+ *  [com.ledger.app.security.AppLockManager]. During a lockout the pad is
+ *  disabled and shows how long is left, so it doesn't look broken. Biometrics
+ *  stay available, so the owner isn't locked out by someone else's guesses.
  */
 @Composable
 fun LockScreen(
@@ -48,15 +53,26 @@ fun LockScreen(
     showBiometric: Boolean,
     onVerifyPin: (String) -> Boolean,
     onUnlocked: () -> Unit,
+    lockoutRemainingMillis: () -> Long = { 0L },
     onBiometric: () -> Unit = {},
 ) {
     val colors = LedgerThemeTokens.colors
     var entered by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
+    var waitMillis by remember { mutableLongStateOf(lockoutRemainingMillis()) }
     val shake = remember { Animatable(0f) }
 
-    // Auto-launch biometric once when it's the primary method.
+    // Open the biometric prompt once when it is the main method.
     LaunchedEffect(showBiometric) { if (showBiometric) onBiometric() }
+
+    // Counts down while a lockout is running. Keyed on the boolean, so it only
+    // restarts when a lockout starts or ends.
+    LaunchedEffect(waitMillis > 0) {
+        while (waitMillis > 0) {
+            delay(500)
+            waitMillis = lockoutRemainingMillis()
+        }
+    }
 
     fun submit(pin: String) {
         if (onVerifyPin(pin)) {
@@ -64,6 +80,7 @@ fun LockScreen(
         } else {
             error = true
             entered = ""
+            waitMillis = lockoutRemainingMillis()
         }
     }
 
@@ -80,7 +97,7 @@ fun LockScreen(
     }
 
     fun press(digit: Int) {
-        if (entered.length >= pinLength) return
+        if (waitMillis > 0 || entered.length >= pinLength) return
         error = false
         entered += digit.toString()
         if (entered.length == pinLength) submit(entered)
@@ -94,14 +111,18 @@ fun LockScreen(
         Text("Ledger", style = MaterialTheme.typography.displayLarge)
         Spacer(Modifier.height(10.dp))
         Text(
-            if (error) "Incorrect PIN — try again" else "Enter your PIN to continue",
+            when {
+                waitMillis > 0 -> "Too many attempts. Try again in ${waitLabel(waitMillis)}"
+                error -> "Incorrect PIN. Try again."
+                else -> "Enter your PIN to continue"
+            },
             style = MaterialTheme.typography.bodyLarge,
-            color = if (error) colors.spend else colors.inkMuted,
+            color = if (error || waitMillis > 0) colors.spend else colors.inkMuted,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(28.dp))
 
-        // Dot indicator.
+        // Dots.
         Row(
             Modifier.offset(x = shake.value.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -119,23 +140,27 @@ fun LockScreen(
 
         Spacer(Modifier.height(36.dp))
 
-        // Keypad.
+        // Keypad, dimmed and disabled during a lockout.
+        val pad = waitMillis == 0L
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             listOf(listOf(1, 2, 3), listOf(4, 5, 6), listOf(7, 8, 9)).forEach { rowDigits ->
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    rowDigits.forEach { d -> KeypadKey(label = d.toString(), onClick = { press(d) }) }
+                    rowDigits.forEach { d ->
+                        KeypadKey(label = d.toString(), enabled = pad, onClick = { press(d) })
+                    }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                // Biometric (or empty spacer to keep the grid aligned).
+                // Biometric key, or an empty space to keep the grid aligned.
                 if (showBiometric) {
                     KeypadKey(icon = Icons.Default.Fingerprint, onClick = onBiometric)
                 } else {
                     Spacer(Modifier.size(72.dp))
                 }
-                KeypadKey(label = "0", onClick = { press(0) })
+                KeypadKey(label = "0", enabled = pad, onClick = { press(0) })
                 KeypadKey(
                     icon = Icons.AutoMirrored.Filled.Backspace,
+                    enabled = pad,
                     onClick = { if (entered.isNotEmpty()) { error = false; entered = entered.dropLast(1) } },
                 )
             }
@@ -143,10 +168,17 @@ fun LockScreen(
     }
 }
 
+/** "45s" under a minute, whole minutes above it ("5 min"). */
+private fun waitLabel(millis: Long): String {
+    val seconds = (millis + 999) / 1000
+    return if (seconds < 60) "${seconds}s" else "${(seconds + 59) / 60} min"
+}
+
 @Composable
 private fun KeypadKey(
     label: String? = null,
     icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val colors = LedgerThemeTokens.colors
@@ -155,12 +187,13 @@ private fun KeypadKey(
             .size(72.dp)
             .clip(CircleShape)
             .background(colors.surfaceSunken)
-            .clickable(onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
+        val tint = if (enabled) LedgerPalette.Ink else colors.inkMuted
         when {
-            label != null -> Text(label, style = MaterialTheme.typography.headlineSmall, color = LedgerPalette.Ink, fontWeight = FontWeight.SemiBold)
-            icon != null -> Icon(icon, contentDescription = null, tint = colors.inkSoft, modifier = Modifier.size(26.dp))
+            label != null -> Text(label, style = MaterialTheme.typography.headlineSmall, color = tint, fontWeight = FontWeight.SemiBold)
+            icon != null -> Icon(icon, contentDescription = null, tint = if (enabled) colors.inkSoft else colors.inkMuted, modifier = Modifier.size(26.dp))
         }
     }
 }

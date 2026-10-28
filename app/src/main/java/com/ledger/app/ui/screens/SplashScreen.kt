@@ -53,13 +53,11 @@ import kotlinx.coroutines.delay
 private val SealPaper = Color(0xFFF1E9D8)
 
 /**
- * The design's choreography, at 90% of its original durations.
+ * Speeds up the design's animation timings to 90%.
  *
- * The ratios are the spec's exactly; only the tempo changed. Running the timeline
- * at full length would hold every launch for 2.4s, and dismissing earlier than
- * that would ship a splash whose last element never appears at all — hence a
- * scale factor rather than a hard cut. 0.9 puts the whole beat at ~2.16s, which
- * is long enough for the seal to be watched rather than glimpsed.
+ * The proportions between steps stay the same. At full length the splash
+ * would hold every launch for 2.4 seconds; at 0.9 it takes about 2.16
+ * seconds, which is still long enough to see the seal draw.
  */
 private const val TEMPO = 0.9f
 
@@ -77,28 +75,24 @@ private const val SUB_DELAY = 500
 private const val FOOTER_MS = 1600
 private const val FOOTER_DELAY = 800
 
-/** When every entrance animation has finished — the last one to land is the
- *  footer, so the splash is held exactly this long and not a frame longer. */
+/** When the last animation (the footer) finishes. The splash is held exactly this long. */
 private val TIMELINE_MS = (FOOTER_DELAY + FOOTER_MS) * TEMPO
 
 private val MarkRiseEasing = CubicBezierEasing(0.2f, 0.8f, 0.3f, 1f)
 
 /**
- * The launch splash: a struck coin seal on ruled paper.
+ * The launch splash: a coin seal drawing itself on ruled paper.
  *
- * This owns the whole brand moment rather than sharing it with the system splash
- * (which contributes only the cream page — see `splash_no_icon.xml`), because the
- * design's first note is the seal *drawing itself*, and an animation cannot be
- * handed over halfway. Cream to cream, the seal strikes exactly once.
+ * The system splash only shows the plain cream page (see
+ * `splash_no_icon.xml`). This screen does the whole animation, because an
+ * animation can't be handed over halfway.
  *
- * Deliberately self-timed: it calls [onFinished] when the animation completes and
- * never waits on data. Gating a brand moment on the database would turn a fixed,
- * predictable beat into an indeterminate stare — which is what the per-screen
- * loading skeletons exist to cover.
+ * It runs on its own timer and calls [onFinished] when the animation ends. It
+ * never waits for data; each screen's loading placeholders cover that.
  */
 @Composable
 fun SplashScreen(onFinished: () -> Unit) {
-    // One clock drives every entrance animation, so they cannot drift apart.
+    // One clock drives every animation, so they stay in step.
     val clock = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         clock.animateTo(TIMELINE_MS, tween(TIMELINE_MS.toInt(), easing = LinearEasing))
@@ -119,7 +113,7 @@ fun SplashScreen(onFinished: () -> Unit) {
 
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             SealTile(
-                // stroke-dashoffset on the ring becomes a sweep angle here.
+                // The design's stroke-dashoffset on the ring becomes a sweep angle here.
                 ringProgress = phase(t, SEAL_DRAW_DELAY, SEAL_DRAW_MS),
                 glyphAlpha = wordFade(t, GLYPH_DELAY, GLYPH_MS),
                 struckAlpha = wordFade(t, STRUCK_DELAY, STRUCK_MS),
@@ -154,8 +148,7 @@ fun SplashScreen(onFinished: () -> Unit) {
             )
         }
 
-        // The privacy line anchors the bottom: the spine of the product greets you
-        // before the first screen even loads.
+        // The privacy line sits at the bottom of the splash.
         Column(
             Modifier
                 .align(Alignment.BottomCenter)
@@ -187,20 +180,23 @@ fun SplashScreen(onFinished: () -> Unit) {
     }
 }
 
-/** Linear 0..1 progress through the window at [delay] lasting [duration], both
- *  scaled by [TEMPO] so the whole timeline retards or advances together. */
+/**
+ * Progress from 0 to 1 through the window starting at [delay] and lasting
+ * [duration]. Both are scaled by [TEMPO].
+ */
 private fun phase(t: Float, delay: Int, duration: Int): Float =
     ((t - delay * TEMPO) / (duration * TEMPO)).coerceIn(0f, 1f)
 
-/** The design's `wordFade`, which holds at zero for the first 60% of its run —
- *  the pause that lets the seal land before the words follow. */
+/**
+ * The design's `wordFade`. It stays at zero for the first 60% of its run, so
+ * the seal lands before the words appear.
+ */
 private fun wordFade(t: Float, delay: Int, duration: Int): Float =
     ((phase(t, delay, duration) - 0.6f) / 0.4f).coerceIn(0f, 1f)
 
 /**
- * Faint ruled lines behind the mark — the ledger metaphor without a heavy
- * illustration. Drawn rather than tiled from a bitmap so it stays crisp at any
- * density.
+ * Faint ruled lines behind the mark, like a ledger page. Drawn rather than
+ * tiled from a bitmap, so they stay sharp at any screen density.
  */
 @Composable
 private fun RuledPaper() {
@@ -217,9 +213,9 @@ private fun RuledPaper() {
 }
 
 /**
- * The terracotta tile and the seal it holds. [ringProgress] strikes the outer
- * ring round from the top; [struckAlpha] fades in the dashed inner ring and
- * [glyphAlpha] the ₵, so the coin reads as struck and then inked.
+ * The terracotta tile and the seal on it. [ringProgress] draws the outer ring
+ * from the top; [struckAlpha] fades in the dashed inner ring and [glyphAlpha]
+ * the ₵.
  */
 @Composable
 private fun SealTile(
@@ -228,11 +224,9 @@ private fun SealTile(
     struckAlpha: Float,
     modifier: Modifier = Modifier,
 ) {
-    // The ₵ is the launcher icon's own outline, built once for this density
-    // rather than per frame. See cediPath: using the real geometry instead of a
-    // Text glyph is what makes the mark identical to the icon and centred by
-    // construction — the text version drifted off-centre and changed weight with
-    // whatever serif the device happened to supply.
+    // The ₵ uses the launcher icon's own outline, built once for this density.
+    // Using the real shape (see cediPath) rather than a text glyph keeps it
+    // identical to the icon and centred, whatever fonts the device has.
     val markPx = with(LocalDensity.current) { SEAL_CANVAS.toPx() }
     val glyph = remember(markPx) { cediPath(markPx / 100f, Offset(markPx / 2f, markPx / 2f)) }
 
@@ -243,7 +237,7 @@ private fun SealTile(
         contentAlignment = Alignment.Center,
     ) {
         Canvas(Modifier.size(SEAL_CANVAS)) {
-            // The design's 100-unit glyph space, so radii and widths transfer 1:1.
+            // The design uses a 100-unit box, so its sizes carry over directly.
             val u = size.minDimension / 100f
             val centre = Offset(size.width / 2f, size.height / 2f)
 
@@ -266,7 +260,7 @@ private fun SealTile(
                     alpha = struckAlpha,
                     style = Stroke(
                         width = 1.3f * u,
-                        // The spec's `stroke-dasharray: 2 5.5`, in glyph units.
+                        // The design's `stroke-dasharray: 2 5.5`, in those units.
                         pathEffect = PathEffect.dashPathEffect(floatArrayOf(2f * u, 5.5f * u)),
                     ),
                 )
@@ -279,12 +273,14 @@ private fun SealTile(
     }
 }
 
-/** The seal's drawing box inside the tile. The ₵ path is sized from this, so it
- *  has to be a constant rather than read from the layout. */
+/**
+ * The seal's drawing area inside the tile. The ₵ path is sized from it, so it
+ * has to be a constant rather than read from the layout.
+ */
 private val SEAL_CANVAS = 70.dp
 private val TileShape = RoundedCornerShape(30.dp)
 
-/** Three gold dots breathing in sequence — a heartbeat, not a spinner. */
+/** Three gold dots that pulse one after another. */
 @Composable
 private fun PulsingDots() {
     val transition = rememberInfiniteTransition(label = "splash-dots")

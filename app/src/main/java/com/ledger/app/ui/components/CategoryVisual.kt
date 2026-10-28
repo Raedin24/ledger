@@ -14,6 +14,12 @@ import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.CardGiftcard
+import androidx.compose.material.icons.filled.Chair
+import androidx.compose.material.icons.filled.Checkroom
+import androidx.compose.material.icons.filled.ChildCare
+import androidx.compose.material.icons.filled.Nightlife
+import androidx.compose.material.icons.filled.Pets
+import androidx.compose.material.icons.filled.RequestQuote
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.DirectionsBike
 import androidx.compose.material.icons.filled.DirectionsBus
@@ -52,23 +58,24 @@ import androidx.compose.ui.unit.dp
 import com.ledger.app.ui.theme.LedgerPalette
 
 /**
- * A category's visual identity: a soft [tint] backing, a saturated [accent], and
- * the glyph that stands for it. Every default category gets a real icon; anything
- * the user creates falls back to a generic tag so the shape stays consistent.
+ * How a category looks: a soft [tint] background, a stronger [accent] colour,
+ * and an icon. Every default category has its own icon; categories the user
+ * creates get a generic tag icon.
  */
 data class CategoryVisual(val tint: Color, val accent: Color, val icon: ImageVector)
 
 private fun cv(tint: Long, accent: Long, icon: ImageVector) =
     CategoryVisual(Color(tint), Color(accent), icon)
 
-// Tint/accent pairs lifted from the design mock's `cats` table and extended in
-// the same key for the wider default set (see DefaultCategories): spending in the
-// paper-and-earth family, income in greens, so which side of the ledger a row
-// belongs to reads from its colour alone.
+// Tint and accent pairs from the design mock, extended for the full default
+// set (see DefaultCategories). Spending uses earth tones and income uses
+// greens, so the colour alone shows which side a row is on.
 private val KNOWN: Map<String, CategoryVisual> = mapOf(
-    // ---- money out ----
+    // ---- Money out ----
     "food & drink" to cv(0xFFF0E2D8, 0xFFA9552F, Icons.Default.Restaurant),
+    "dining & outings" to cv(0xFFF1E0DC, 0xFFA34A4A, Icons.Default.Nightlife),
     "groceries" to cv(0xFFEDE6D4, 0xFF8C7A2E, Icons.Default.ShoppingCart),
+    "household" to cv(0xFFE9E4D8, 0xFF7D6B47, Icons.Default.Chair),
     "transport" to cv(0xFFF2E9D3, 0xFFB07D1E, Icons.Default.DirectionsBus),
     "fuel" to cv(0xFFF0DFD5, 0xFF9C5A33, Icons.Default.LocalGasStation),
     "car" to cv(0xFFE3E6EA, 0xFF5C6B7A, Icons.Default.DirectionsCar),
@@ -79,22 +86,25 @@ private val KNOWN: Map<String, CategoryVisual> = mapOf(
     "airtime & data" to cv(0xFFDDE8E4, 0xFF4F766E, Icons.Default.SignalCellularAlt),
     "health" to cv(0xFFDFE8EA, 0xFF5F7F8A, Icons.Default.LocalHospital),
     "personal care" to cv(0xFFEEE1E6, 0xFF8E6376, Icons.Default.Spa),
+    "clothing" to cv(0xFFEBE0E9, 0xFF84597A, Icons.Default.Checkroom),
     "family" to cv(0xFFEDDFE1, 0xFF9C5F6B, Icons.Default.Groups),
+    "kids" to cv(0xFFF0E4DA, 0xFFA8693A, Icons.Default.ChildCare),
+    "pet care" to cv(0xFFEAE5D9, 0xFF7E7046, Icons.Default.Pets),
     "gifts & donations" to cv(0xFFEFE1DE, 0xFFA05B54, Icons.Default.CardGiftcard),
     "shopping" to cv(0xFFE6E1EE, 0xFF7A6B9C, Icons.Default.ShoppingBag),
     "fitness" to cv(0xFFE1E8DE, 0xFF5E7A52, Icons.Default.FitnessCenter),
     "entertainment" to cv(0xFFE7E0EC, 0xFF6F5F91, Icons.Default.Movie),
     "debt repayment" to cv(0xFFEEDEDA, 0xFF9A4F3F, Icons.Default.CreditCard),
+    "taxes" to cv(0xFFE4E2DE, 0xFF6E655A, Icons.Default.RequestQuote),
     "savings" to cv(0xFFDFE9DC, 0xFF4F7A4D, Icons.Default.AccountBalanceWallet),
     "investment" to cv(0xFFDEE7E9, 0xFF3F6F78, Icons.Default.TrendingUp),
     "misc" to cv(0xFFE8E3DA, 0xFF8A8175, Icons.Default.MoreHoriz),
-    // Not a category the user owns — the breakdowns' pooled provider charges.
-    // Slate rather than an earth tone, so a cost of moving money doesn't read as
-    // another thing money was spent *on*.
+    // Not a real category: the breakdowns' grouped provider fees. Slate rather
+    // than an earth tone, so a fee doesn't look like something bought.
     "transaction fees" to cv(0xFFE1E4E8, 0xFF6B7280, Icons.Default.Percent),
-    // ---- both ----
+    // ---- Both ----
     "transfers" to cv(0xFFDCE3EC, 0xFF52708C, Icons.Default.SwapHoriz),
-    // ---- money in ----
+    // ---- Money in ----
     "salary" to cv(0xFFDFE9DC, 0xFF4F7A4D, Icons.Default.Payments),
     "income" to cv(0xFFDFE9DC, 0xFF4F7A4D, Icons.Default.Payments),
     "bonus" to cv(0xFFE6EBD9, 0xFF60793C, Icons.Default.Star),
@@ -110,7 +120,7 @@ private val KNOWN: Map<String, CategoryVisual> = mapOf(
 // Gold question mark, matching the mock's uncategorised mark.
 private val UNCATEGORISED = cv(0xFFF0E6CF, 0xFFA9772A, Icons.AutoMirrored.Filled.HelpOutline)
 
-// Stable palette for user-created categories not in the known set.
+// Fixed palette for categories the user creates.
 private val FALLBACK = listOf(
     cv(0xFFF0E2D8, 0xFFA9552F, Icons.AutoMirrored.Filled.Label),
     cv(0xFFE6E1EE, 0xFF7A6B9C, Icons.AutoMirrored.Filled.Label),
@@ -123,7 +133,7 @@ private val FALLBACK = listOf(
     cv(0xFFE8E3DA, 0xFF8A8175, Icons.AutoMirrored.Filled.Label),
 )
 
-/** Deterministic tint/accent/icon for a category name (case-insensitive). */
+/** The tint, accent and icon for a category name, ignoring case. Always the same for the same name. */
 fun categoryVisual(name: String?): CategoryVisual {
     val key = name?.trim()?.lowercase().orEmpty()
     if (key.isEmpty()) return UNCATEGORISED
@@ -131,7 +141,7 @@ fun categoryVisual(name: String?): CategoryVisual {
     return FALLBACK[(key.hashCode() and 0x7fffffff) % FALLBACK.size]
 }
 
-/** A rounded, tinted square holding the category's icon — the list/summary mark. */
+/** A rounded, tinted square with the category's icon, used in lists and summaries. */
 @Composable
 fun CategoryMark(name: String?, modifier: Modifier = Modifier, size: Dp = 26.dp) {
     val visual = categoryVisual(name)
@@ -148,10 +158,10 @@ fun CategoryMark(name: String?, modifier: Modifier = Modifier, size: Dp = 26.dp)
     }
 }
 
-/** Hoisted so the pill in every transaction row shares one shape instance. */
+/** Shared by the pill in every transaction row. */
 private val PillShape = RoundedCornerShape(20.dp)
 
-/** An inline tinted pill (icon + name) used in transaction rows. */
+/** A small tinted pill (icon and name) used in transaction rows. */
 @Composable
 fun CategoryPill(name: String?, modifier: Modifier = Modifier) {
     val visual = categoryVisual(name)

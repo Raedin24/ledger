@@ -60,7 +60,7 @@ fun RulesScreen(
 ) {
     val rules by vm.rules.collectAsStateWithLifecycle()
     val categories by vm.categories.collectAsStateWithLifecycle()
-    // Non-null = the editor is open (a fresh entity for "add", an existing one for "edit").
+    // Not null while the editor is open: a new rule for "add", an existing one for "edit".
     var editing by remember { mutableStateOf<RuleEntity?>(null) }
 
     LazyColumn(
@@ -71,7 +71,7 @@ fun RulesScreen(
             Spacer(Modifier.height(18.dp))
             ScreenHeader("Rules", onBack)
             Text(
-                "Rules auto-sort a sender every time. Highest priority wins when more than one matches.",
+                "Each rule files a sender automatically. Highest priority wins.",
                 style = MaterialTheme.typography.bodyMedium, color = LedgerPalette.InkMuted,
             )
         }
@@ -97,7 +97,7 @@ fun RulesScreen(
                 LedgerCard {
                     Text("No rules yet.", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "Confirming a transaction in Review with \"Always sort this sender this way\" creates one automatically — or add one here.",
+                        "Turn on \"Always sort this sender this way\" in Review, or add one here.",
                         style = MaterialTheme.typography.bodyMedium, color = LedgerPalette.InkMuted,
                     )
                 }
@@ -186,7 +186,7 @@ private fun RuleEditorDialog(
 
             Spacer(Modifier.height(12.dp))
             FieldLabel("Direction")
-            // Same two words the rest of the app uses — see directionLabel.
+            // The same two words used everywhere else (see directionLabel).
             Segmented(listOf("DEBIT" to MONEY_OUT, "CREDIT" to MONEY_IN), direction) { direction = it }
 
             Spacer(Modifier.height(12.dp))
@@ -195,9 +195,9 @@ private fun RuleEditorDialog(
 
             Spacer(Modifier.height(12.dp))
             FieldLabel("Category")
-            // Follows the direction above: a rule that files credits shouldn't
-            // offer "Rent". Switching direction can strand the current pick, so
-            // it falls back to the first label on the new side.
+            // Only categories for the direction above: a rule for money in shouldn't
+            // offer "Rent". If switching direction makes the current pick invalid, it
+            // falls back to the first category on the new side.
             val offered = categories.forDirection(direction)
             LaunchedEffect(direction) {
                 if (category !in offered) category = offered.firstOrNull().orEmpty()

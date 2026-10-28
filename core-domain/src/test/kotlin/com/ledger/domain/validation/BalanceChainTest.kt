@@ -9,9 +9,8 @@ import org.junit.jupiter.api.Test
 class BalanceChainTest {
 
     /**
-     * Exact by construction. Going via Double loses pesewas — 128.64 * 100 is
-     * 12863.999…, which truncates to 12863 while 628.64 * 100 rounds up — and a
-     * test for balance arithmetic cannot afford to disagree with itself.
+     * Builds the amount from text so it is exact. Going through Double loses
+     * pesewas: 128.64 * 100 is 12863.999..., which truncates to 12863.
      */
     private fun ghs(major: String) =
         Money(java.math.BigDecimal(major).movePointRight(2).longValueExact())
@@ -69,9 +68,8 @@ class BalanceChainTest {
     }
 
     /**
-     * The attack this exists for: a spoofed sender injects a plausible credit,
-     * but has to guess the balance it lands on. Anything but the exact figure
-     * contradicts the chain.
+     * A fake message has to guess the balance it lands on. Anything but the exact
+     * figure breaks the chain.
      */
     @Test
     fun `an injected transaction guessing the balance does not follow`() {
@@ -86,7 +84,7 @@ class BalanceChainTest {
         )
     }
 
-    /** The same guess landing exactly right is indistinguishable, by design. */
+    /** A guess that is exactly right can't be told apart, and that is expected. */
     @Test
     fun `an injected transaction that guesses the balance exactly does follow`() {
         assertTrue(
@@ -100,7 +98,7 @@ class BalanceChainTest {
         )
     }
 
-    /** Off by one pesewa is still a break — no tolerance, these are integers. */
+    /** One pesewa off is still a break. There is no tolerance; these are integers. */
     @Test
     fun `a single pesewa of drift does not follow`() {
         assertFalse(
@@ -114,7 +112,7 @@ class BalanceChainTest {
         )
     }
 
-    /** A missed message leaves the same footprint as an injection. */
+    /** A missed message looks the same as a fake one. */
     @Test
     fun `a gap in the chain does not follow`() {
         assertFalse(

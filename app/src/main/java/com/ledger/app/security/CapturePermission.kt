@@ -6,17 +6,16 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 
 /**
- * Runtime permission gate for automatic SMS capture.
+ * Runtime permission checks for automatic SMS capture.
  *
- * RECEIVE_SMS is a *dangerous* permission, so declaring it in the manifest is
- * not enough — [com.ledger.app.sms.SmsReceiver] stays dormant until the user
- * grants it at runtime. Everything downstream (parse/validate/dedup/persist) is
- * already wired; this is the switch that lets messages actually reach it.
+ * RECEIVE_SMS is a dangerous permission, so declaring it in the manifest isn't
+ * enough. [com.ledger.app.sms.SmsReceiver] receives nothing until the user
+ * grants it at runtime.
  */
 object CapturePermission {
     const val RECEIVE_SMS: String = Manifest.permission.RECEIVE_SMS
 
-    /** READ_SMS backs the one-time historical-import of the existing inbox. */
+    /** READ_SMS is needed for the one-time import of messages already in the inbox. */
     const val READ_SMS: String = Manifest.permission.READ_SMS
 
     /** True once the user has granted RECEIVE_SMS and live capture can run. */

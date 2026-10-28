@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
@@ -45,7 +46,7 @@ import androidx.compose.ui.unit.dp
 import com.ledger.app.ui.components.CategoryMark
 import com.ledger.app.ui.theme.LedgerPalette
 
-/** Screen title with a leading back arrow — shared by the editor screens. */
+/** A screen title with a back arrow, used by the editor screens. */
 @Composable
 fun ScreenHeader(title: String, onBack: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -58,15 +59,13 @@ fun ScreenHeader(title: String, onBack: () -> Unit) {
 }
 
 /**
- * The app's flat, indicator-less text field.
+ * The app's plain text field, with no underline or label.
  *
- * Built on [BasicTextField] rather than Material3's `TextField`, which was the
- * heaviest repeating composable in the app. `TextField` brings a decoration box
- * with an animated label, container and indicator — all of which this design
- * immediately turns off — and `TextFieldDefaults.colors(...)` allocates a
- * thirty-odd-colour object on *every* recomposition. Review lays out two of these
- * per queued transaction inside cards half a screen tall, so composing one card
- * as it scrolled in was paying for all of that twice over.
+ * It is built on [BasicTextField] rather than Material3's `TextField`.
+ * `TextField` adds an animated label, a container and an indicator, all of
+ * which this design turns off, and it is costly to redraw. The Review screen
+ * shows two fields on every queued card, so the lighter field keeps scrolling
+ * smooth.
  */
 @Composable
 fun PlainField(
@@ -75,6 +74,7 @@ fun PlainField(
     placeholder: String,
     modifier: Modifier = Modifier,
     singleLine: Boolean = true,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
 ) {
     val typography = MaterialTheme.typography
     val textStyle = remember(typography) { typography.bodyMedium.copy(color = LedgerPalette.Ink) }
@@ -83,8 +83,12 @@ fun PlainField(
         onValueChange = onChange,
         singleLine = singleLine,
         textStyle = textStyle,
+        keyboardOptions = keyboardOptions,
         cursorBrush = CursorBrush,
+        // Always full width. A bare BasicTextField is only as wide as its text.
+        // A caller's weight or padding still applies.
         modifier = modifier
+            .fillMaxWidth()
             .background(LedgerPalette.SurfaceAlt, FieldShape)
             .padding(horizontal = 14.dp, vertical = 13.dp),
     ) { field ->
@@ -105,17 +109,17 @@ fun PlainField(
 
 private val FieldShape = RoundedCornerShape(12.dp)
 
-/** Hoisted: a `SolidColor` per recomposition, per field, otherwise. */
+/** Created once rather than for every field on every redraw. */
 private val CursorBrush = SolidColor(LedgerPalette.Gold)
 
-/** Small caps label above a form field. */
+/** Small-caps label above a form field. */
 @Composable
 fun FieldLabel(text: String) =
     Text(text, style = MaterialTheme.typography.labelSmall, color = LedgerPalette.InkMuted)
 
 /**
- * A row of mutually-exclusive pills — the app's one-of-N control. [options] maps
- * each stored value to the label shown for it.
+ * A row of pills where exactly one is selected. [options] maps each stored
+ * value to the label shown for it.
  */
 @Composable
 fun Segmented(options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
@@ -140,24 +144,15 @@ fun Pill(label: String, active: Boolean, onClick: () -> Unit) {
 private val PillShape = RoundedCornerShape(11.dp)
 
 /**
- * The shared category picker: a bottom sheet of full-width rows.
+ * The shared category picker: a bottom sheet with one category per row.
  *
- * This was a dialog full of wrapped chips, which is what the design mock calls a
- * bottom sheet and what the default set had outgrown. The chip cloud had three
- * problems and they compound: the labels are wildly different widths ("Fuel" next
- * to "Investment Return"), so the rows ragged and there was no column for the eye
- * to run down; a dialog is sized to its content, so twenty-odd chips filled the
- * screen edge to edge with no way to scroll what didn't fit; and the whole thing
- * opened in the middle of the screen, furthest from the thumb that has to reach
- * it — on the Review card, directly on top of the transaction being sorted.
+ * Each row shows the category's coloured icon first, so the user can find it
+ * by icon and colour before reading. The sheet rises from the bottom, within
+ * reach of the thumb, scrolls when the list is long, and leaves the card it
+ * belongs to visible above it.
  *
- * Rows fix all three. One category per line, left-aligned on its tinted mark, so
- * the name is scanned by its icon and colour before it is read. The sheet rises
- * from the bottom edge, lands under the thumb, scrolls when it has to, and leaves
- * the card it belongs to visible above it.
- *
- * [title] is worth setting where the picker means something more specific than
- * choosing — re-filing a transaction, or applying one label to a selection.
+ * Set [title] when the picker does something more specific than choosing,
+ * such as re-filing a transaction or labelling a selection.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -185,9 +180,7 @@ fun CategoryPickerSheet(
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.padding(horizontal = 18.dp),
         )
-        // Only once the list is long enough that reading it beats typing. Below
-        // that a search box is one more thing to look past on the way to a label
-        // that was already on screen.
+        // Only show a search box once the list is long enough to need one.
         if (categories.size > SEARCHABLE_FROM) {
             Spacer(Modifier.height(12.dp))
             PlainField(
@@ -199,9 +192,8 @@ fun CategoryPickerSheet(
         }
         Spacer(Modifier.height(10.dp))
 
-        // weight(fill = false): takes the space it needs and no more, so a short
-        // list makes a short sheet, and a long one stops at the sheet's own
-        // ceiling and scrolls inside it.
+        // weight(fill = false) takes only the space it needs: a short list makes a
+        // short sheet, and a long one stops at the sheet's maximum and scrolls.
         LazyColumn(
             Modifier.fillMaxWidth().weight(1f, fill = false),
             contentPadding = PaddingValues(bottom = 28.dp),
@@ -220,8 +212,7 @@ fun CategoryPickerSheet(
                 PickerRow(
                     name = name,
                     selected = name == current,
-                    // Hairlines between rows, not under the last one — a rule
-                    // above the sheet's bottom padding reads as a cut-off list.
+                    // Lines between rows, but not under the last one.
                     divider = index < shown.lastIndex,
                     onClick = { onPick(name) },
                 )
@@ -230,7 +221,7 @@ fun CategoryPickerSheet(
     }
 }
 
-/** Category count past which the picker offers a search field. */
+/** How many categories before the picker shows a search box. */
 private const val SEARCHABLE_FROM = 12
 
 @Composable
@@ -239,8 +230,7 @@ private fun PickerRow(name: String, selected: Boolean, divider: Boolean, onClick
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            // 11dp on a 34dp mark clears the 48dp minimum touch target, which the
-            // chips it replaced did not.
+            // 11dp around a 34dp icon meets the 48dp minimum touch target.
             .padding(horizontal = 18.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(13.dp),
@@ -275,7 +265,7 @@ private fun PickerRow(name: String, selected: Boolean, divider: Boolean, onClick
     }
 }
 
-/** Single-line text-entry dialog (used for rename / quick add). */
+/** A dialog with one line of text, used to rename or quickly add. */
 @Composable
 fun TextInputDialog(
     title: String,

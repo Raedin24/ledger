@@ -6,8 +6,8 @@ pluginManagement {
     }
 }
 
-// Lets Gradle auto-download a matching JDK (e.g. 17) when one isn't installed,
-// so `jvmToolchain(17)` / compileOptions 17 don't fail on a fresh machine.
+// Lets Gradle download a matching JDK (17) when none is installed, so
+// `jvmToolchain(17)` works on a fresh machine.
 plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
 }

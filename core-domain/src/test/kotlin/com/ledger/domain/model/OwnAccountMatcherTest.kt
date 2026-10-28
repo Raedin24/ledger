@@ -7,9 +7,8 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
- * Covers the three shapes a provider can use to describe the *same* movement
- * between two wallets the user owns. Route 1 (the number is the counterparty)
- * already worked; routes 2 and 3 are why this class exists.
+ * Covers the three ways a provider can describe the same transfer between two
+ * wallets the user owns.
  */
 class OwnAccountMatcherTest {
 
@@ -21,7 +20,7 @@ class OwnAccountMatcherTest {
         names: Set<String> = setOf("ama owusu"),
     ) = OwnAccountMatcher(keys, names)
 
-    // ---- Route 1: the counterparty *is* the number (GhanaPay) ----
+    // ---- Check 1: the counterparty is the number (GhanaPay) ----
 
     @Test
     fun `a number in the counterparty field is recognised in any spelling`() {
@@ -34,11 +33,11 @@ class OwnAccountMatcherTest {
         assertFalse(matcher().isOwn("0271112222", null))
     }
 
-    // ---- Route 2: the counterparty is a name (MTN) ----
+    // ---- Check 2: the counterparty is a name (MTN) ----
 
     @Test
     fun `MTN's received-from name is recognised as the user's own account`() {
-        // The exact case that was being counted as income from a stranger.
+        // Money from the user's own wallet must not count as income.
         assertTrue(matcher().isOwn("AMA OWUSU", null))
         assertTrue(matcher().isOwn("Ama Owusu", null))
         assertTrue(matcher().isOwn("  ama   owusu  ", null))
@@ -46,8 +45,8 @@ class OwnAccountMatcherTest {
 
     @Test
     fun `a name match does not depend on which provider sent the alert`() {
-        // A name registered against the GhanaPay account is exactly what appears
-        // inside an MTN alert — scoping by institution would defeat the purpose.
+        // A name saved against the GhanaPay account is exactly what appears in
+        // an MTN alert, so matching must not be limited by provider.
         val onlyNames = OwnAccountMatcher(emptySet(), setOf("ama owusu"))
         assertTrue(onlyNames.isOwn("AMA OWUSU", null))
     }
@@ -58,7 +57,7 @@ class OwnAccountMatcherTest {
         assertFalse(matcher().isOwn("MTN Airtime", null))
     }
 
-    // ---- Route 3: the number rides in the narration (cross-network) ----
+    // ---- Check 3: the number is in the narration (cross-network) ----
 
     @Test
     fun `Telecel's transfer-from narration carries the number`() {
@@ -98,8 +97,8 @@ class OwnAccountMatcherTest {
 
     @Test
     fun `an amount next to a number never fuses into a bogus key`() {
-        // "GHS 2.38 0244..." must not yield a key built from the amount's tail;
-        // that would silently match an account the user never registered.
+        // "GHS 2.38 0244..." must not produce a key from the end of the amount,
+        // which could match an account the user never added.
         val keys = AccountKey.allIn("Payment of GHS 2.38 completed")
         assertTrue(keys.isEmpty(), "amounts must not look like account numbers: $keys")
     }

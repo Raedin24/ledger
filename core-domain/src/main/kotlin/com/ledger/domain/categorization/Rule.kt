@@ -3,19 +3,19 @@ package com.ledger.domain.categorization
 import com.ledger.domain.model.Direction
 
 /**
- * A categorization rule.
+ * A categorisation rule.
  *
- * Keyed on {counterparty, direction} — NOT counterparty alone — because the
- * same contact can be both a gift recipient (DEBIT) and a reimbursement source
- * (CREDIT); direction is part of the match, not just the produced type.
+ * A rule matches a counterparty and a direction together, not the
+ * counterparty alone. The same person can receive a gift from the user (money
+ * out) and pay them back (money in), and those belong in different categories.
  *
- * Matching is on the counterparty identifier (phone/merchant), never on the
- * free-text SMS reason, which is unreliable and often attacker/terminal
- * controlled.
+ * Matching uses the counterparty (a phone number or merchant name), never the
+ * free-text SMS narration, which the sender writes and can't be relied on.
  *
- * `matchType` guards against the known substring bug (a bare "MOM" rule wrongly
- * matching "MOMOUSER"). EXACT is the safe default for learned rules; CONTAINS
- * is opt-in for deliberately broad merchant rules and still word-boundary aware.
+ * `matchType` stops short names matching inside longer ones (a "MOM" rule
+ * matching "MOMOUSER"). EXACT is the default for rules created from review.
+ * CONTAINS is for broad merchant rules the user sets up on purpose, and it
+ * still only matches whole words.
  */
 data class Rule(
     val id: Long,
@@ -26,11 +26,21 @@ data class Rule(
     val matchType: MatchType = MatchType.EXACT,
     val priority: Int = 0,
     val enabled: Boolean = true,
-    /** Epoch millis of the last transaction this rule matched. Drives the
-     *  stale-rule re-confirmation nudge (6+ months unused). */
+    /**
+     * Epoch millis of the last transaction this rule matched. A rule unused for
+     * six months asks to be confirmed again.
+     */
     val lastMatchedAtMillis: Long? = null,
 ) {
     enum class MatchType { EXACT, CONTAINS }
+
+    /** Compiled once per rule, since every message is tested against every rule. */
+    private val wordPattern: Regex by lazy {
+        Regex(
+            "(?<![A-Za-z0-9])${Regex.escape(counterparty.trim())}(?![A-Za-z0-9])",
+            RegexOption.IGNORE_CASE,
+        )
+    }
 
     fun matches(counterparty: String, direction: Direction): Boolean {
         if (!enabled) return false
@@ -40,14 +50,10 @@ data class Rule(
         if (target.isEmpty() || key.isEmpty()) return false
         return when (matchType) {
             MatchType.EXACT -> target.equals(key, ignoreCase = true)
-            MatchType.CONTAINS -> containsWord(target, key)
+            MatchType.CONTAINS -> containsWord(target)
         }
     }
 
-    private fun containsWord(haystack: String, needle: String): Boolean {
-        // Word-boundary aware substring match: "MOM" must not match "MOMOUSER"
-        // but should match "PAYMENT TO MOM".
-        val pattern = Regex("(?<![A-Za-z0-9])${Regex.escape(needle)}(?![A-Za-z0-9])", RegexOption.IGNORE_CASE)
-        return pattern.containsMatchIn(haystack)
-    }
+    /** Whole words only: "MOM" matches "PAYMENT TO MOM" but not "MOMOUSER". */
+    private fun containsWord(haystack: String): Boolean = wordPattern.containsMatchIn(haystack)
 }

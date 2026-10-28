@@ -14,3 +14,8 @@ npx @resvg/resvg-js-cli docs/icon.svg docs/icon.png
 
 Changing the app icon means changing the vector drawable in `app/src/main/res`;
 these two are downstream of it, not the source.
+
+`index.html` is the public download page, served by GitHub Pages at
+<https://raedin24.github.io/ledger/>. Its button always points at the latest
+release's `ledger.apk`, so it doesn't change between releases. `qr.svg` is a QR
+code for the page's URL. `.nojekyll` makes Pages serve this folder as it is.

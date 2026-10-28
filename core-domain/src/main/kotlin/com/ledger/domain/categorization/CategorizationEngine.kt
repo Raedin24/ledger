@@ -3,28 +3,32 @@ package com.ledger.domain.categorization
 import com.ledger.domain.model.Transaction
 
 /**
- * Applies local rules to transactions. Pure and side-effect-free: it reports
- * what should happen (auto-categorize, review, propose a new rule) and lets the
- * caller persist. This keeps the engine trivially testable and keeps all I/O
- * out of the domain layer.
+ * Applies the user's rules to transactions. It has no side effects: it says
+ * what should happen (file it, send it to review, propose a rule) and the
+ * caller saves the result. That keeps it easy to test and keeps I/O out of the
+ * domain layer.
  */
 class CategorizationEngine(
-    private val staleRuleThresholdMillis: Long = 183L * 24 * 60 * 60 * 1000, // ~6 months
+    private val staleRuleThresholdMillis: Long = 183L * 24 * 60 * 60 * 1000,  // about 6 months
 ) {
 
     sealed interface Outcome {
-        /** A rule matched. The categorized transaction plus the matched rule id
-         *  (so the caller can bump its lastMatchedAt). `needsReconfirm` is true
-         *  when the matched rule has been dormant 6+ months — a recycled phone
-         *  number could now belong to a stranger, so nudge once. */
+        /**
+         * A rule matched. Holds the categorised transaction and the rule's id, so the
+         * caller can update the rule's last-matched time. `needsReconfirm` is true when
+         * the rule hasn't matched for six months or more: phone numbers get reassigned,
+         * so the user is asked once to confirm.
+         */
         data class Categorized(
             val transaction: Transaction,
             val ruleId: Long,
             val needsReconfirm: Boolean,
         ) : Outcome
 
-        /** No rule matched this {counterparty, direction}. Goes to the review
-         *  queue; confirming there should mint a new Rule (see proposeRule). */
+        /**
+         * No rule matched this counterparty and direction. The transaction goes to
+         * the review queue, where confirming it can create a rule (see proposeRule).
+         */
         data class Review(val transaction: Transaction, val reason: String) : Outcome
     }
 
@@ -36,7 +40,7 @@ class CategorizationEngine(
 
         val match = rules
             .filter { it.matches(counterparty, txn.direction) }
-            .maxByOrNull { it.priority } // highest priority wins ties broken by first
+            .maxByOrNull { it.priority }  // highest priority wins; ties go to the first
             ?: return Outcome.Review(txn.copy(needsReview = true), "first-seen counterparty: $counterparty")
 
         val stale = match.lastMatchedAtMillis?.let { nowMillis - it > staleRuleThresholdMillis } ?: false
@@ -45,7 +49,7 @@ class CategorizationEngine(
             transaction = txn.copy(
                 category = match.category,
                 person = match.person,
-                needsReview = stale, // surface for a one-time re-confirmation
+                needsReview = stale,  // ask the user to confirm once
             ),
             ruleId = match.id,
             needsReconfirm = stale,
@@ -53,10 +57,9 @@ class CategorizationEngine(
     }
 
     /**
-     * Builds the rule to persist when a user confirms a reviewed transaction.
-     * Called by the caller after the user picks category/person — encodes the
-     * "always categorize this sender this way" default-on toggle as a rule with
-     * EXACT match on the exact counterparty seen (substring-safe by construction).
+     * Builds the rule to save when the user confirms a reviewed transaction with
+     * "always sort this sender this way" turned on. It uses an EXACT match on the
+     * counterparty as seen, so it can't accidentally match a longer name.
      */
     fun proposeRule(
         nextId: Long,

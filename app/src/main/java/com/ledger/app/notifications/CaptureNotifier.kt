@@ -17,19 +17,20 @@ import com.ledger.app.data.repository.LedgerRepository
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Posts a lightweight notification when live capture records or flags a
- * transaction. Best-effort and entirely local: it silently no-ops when
- * POST_NOTIFICATIONS hasn't been granted (Android 13+), and never posts for
- * duplicates or ignored (OTP/marketing) messages.
+ * Posts a small notification when live capture saves or flags a transaction.
+ * Local only. It does nothing without the POST_NOTIFICATIONS permission
+ * (Android 13+), and never posts for duplicates or ignored messages (OTPs,
+ * marketing).
  */
 object CaptureNotifier {
 
     private const val CHANNEL_ID = "capture"
     private val nextId = AtomicInteger(1000)
 
-    /** Which tab the tap should land on. Read by `MainActivity` and matched
-     *  against the bottom-tab routes in `LedgerApp`; an unrecognised value is
-     *  ignored there rather than throwing. */
+    /**
+     * Which tab the tap should open. Read by `MainActivity` and checked against
+     * the bottom-tab routes in `LedgerApp`; an unknown value is ignored.
+     */
     const val EXTRA_DEST = "com.ledger.app.extra.DEST"
     const val DEST_OVERVIEW = "overview"
     const val DEST_REVIEW = "review"
@@ -45,8 +46,8 @@ object CaptureNotifier {
 
     fun notify(context: Context, outcome: LedgerRepository.Ingested) {
         val (title, text, dest) = when (outcome) {
-            // "Open Ledger to categorise it" is an instruction the tap should
-            // carry out, so this one lands on the queue rather than the dashboard.
+            // The notification says to categorise it, so the tap opens the review
+            // queue rather than the dashboard.
             is LedgerRepository.Ingested.Review ->
                 Triple("New transaction to review", "Open Ledger to categorise it.", DEST_REVIEW)
             is LedgerRepository.Ingested.Saved ->
@@ -60,14 +61,13 @@ object CaptureNotifier {
         }
         val id = nextId.getAndIncrement()
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            // A silhouette, not the launcher icon: the system treats this as an
-            // alpha mask, so a full-bleed adaptive icon flattens to a blob.
+            // A single-colour silhouette, not the launcher icon. Android uses it as a
+            // mask, so a full-colour icon would show as a solid blob.
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(openApp(context, id, dest))
-            // Only does anything once there is a content intent to tap — before
-            // one existed this line was inert, along with the rest of the tap.
+            // Dismiss the notification once it is tapped.
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
@@ -75,17 +75,15 @@ object CaptureNotifier {
     }
 
     /**
-     * The tap target.
+     * What happens when the notification is tapped.
      *
-     * `CLEAR_TOP or SINGLE_TOP` against a `singleTop` activity means a tap
-     * resumes the task that is already there and delivers the new destination
-     * through `onNewIntent`, rather than stacking a second copy of the app over
-     * the first — which, with the lock screen in play, would have meant entering
-     * the PIN again to reach a screen already open underneath.
+     * `CLEAR_TOP or SINGLE_TOP` on a `singleTop` activity resumes the app that is
+     * already open and delivers the new destination through `onNewIntent`. That
+     * avoids opening a second copy of the app, which would mean entering the PIN
+     * again.
      *
-     * [id] doubles as the request code so that two notifications waiting in the
-     * shade keep their own destinations; sharing a request code would have the
-     * second overwrite the first's extras.
+     * [id] is also the request code, so two notifications keep their own
+     * destinations instead of one overwriting the other's extras.
      */
     private fun openApp(context: Context, id: Int, dest: String): PendingIntent {
         val intent = Intent(context, MainActivity::class.java)
@@ -95,8 +93,8 @@ object CaptureNotifier {
             context,
             id,
             intent,
-            // IMMUTABLE is mandatory from Android 12; the extras are ours and
-            // nothing outside needs to fill anything in.
+            // IMMUTABLE is required from Android 12. Nothing outside the app needs to
+            // fill in the extras.
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }

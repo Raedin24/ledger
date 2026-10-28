@@ -9,16 +9,15 @@ import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Passphrase-based encryption for the portable `.ledger` backup.
+ * Passphrase encryption for the portable `.ledger` backup.
  *
- * The backup must survive device loss, so it is deliberately NOT tied to the
- * Android Keystore (which never leaves the device). Instead the key is derived
- * from a user passphrase with PBKDF2, and the payload sealed with AES-GCM
- * (authenticated — a wrong passphrase or any tampering fails to decrypt rather
- * than returning garbage). Nothing here touches the network.
+ * A backup has to survive losing the phone, so it can't use the Android
+ * Keystore, whose keys never leave the device. Instead the key is derived
+ * from the user's passphrase with PBKDF2, and the data is encrypted with
+ * AES-GCM. AES-GCM detects a wrong passphrase or any tampering and fails,
+ * rather than returning garbage. Nothing here uses the network.
  *
- * Container is a small line-based text envelope so it round-trips through plain
- * text streams:
+ * The file is a few lines of text, so it survives plain text handling:
  *
  *     LEDGERBACKUP1
  *     <base64 salt>

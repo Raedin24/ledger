@@ -45,8 +45,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ledger.app.ui.theme.LedgerPalette
 
-// Illustration-specific paper tones, lifted straight from the design mock. These
-// aren't part of the semantic palette — they only exist inside the line-art.
+// Paper tones used only inside the illustrations, taken from the design
+// mock. They aren't part of the main palette.
 private val EnvFill = Color(0xFFF7F2E7)
 private val EnvStroke = Color(0xFFD8CDB5)
 private val LineDark = Color(0xFFC9BDA3)
@@ -60,9 +60,9 @@ private val LensStroke = Color(0xFFB9772E)
 enum class EmptyBadge { Check, Plus }
 
 /**
- * The shared empty-state layout from the redesign: a floating line-art
- * illustration, a serif headline, a soft body line, and an optional dark action
- * button + footnote. Used for first-run, all-caught-up, and no-match states.
+ * The shared empty-state layout: a floating line drawing, a serif headline, a
+ * short line of text, and an optional dark button with a footnote. Used for
+ * first run, "all caught up" and "no matches".
  */
 @Composable
 fun EmptyState(
@@ -72,7 +72,7 @@ fun EmptyState(
     titleStyle: TextStyle = MaterialTheme.typography.titleLarge,
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
-    /** Rings the action with the guide's gold halo when a coach-mark points at it. */
+    /** Highlights the button for the setup guide when a guide step points at it. */
     spotlightAction: Boolean = false,
     footnote: (@Composable () -> Unit)? = null,
     illustration: @Composable () -> Unit,
@@ -112,7 +112,7 @@ fun EmptyState(
     }
 }
 
-/** The dark, cream-on-ink pill button from the mock's empty states. */
+/** The dark pill button with cream text used in empty states. */
 @Composable
 fun PrimaryDarkButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Box(
@@ -132,7 +132,7 @@ fun PrimaryDarkButton(label: String, onClick: () -> Unit, modifier: Modifier = M
     }
 }
 
-/** "🔒 Nothing leaves this device" style reassurance line under a first-run state. */
+/** A reassurance line under a first-run state, such as "Nothing leaves this device". */
 @Composable
 fun PrivacyFootnote(text: String) {
     Row(
@@ -144,7 +144,7 @@ fun PrivacyFootnote(text: String) {
     }
 }
 
-/** Gentle infinite bob, matching the mock's `floaty` keyframe. */
+/** A gentle, endless up-and-down float, from the design mock. */
 @Composable
 private fun Floaty(content: @Composable () -> Unit) {
     val transition = rememberInfiniteTransition(label = "floaty")
@@ -157,9 +157,9 @@ private fun Floaty(content: @Composable () -> Unit) {
     Box(Modifier.offset(y = dy.dp)) { content() }
 }
 
-// ---- Illustrations (Canvas line-art translated from the mock's SVGs) ----
+// ---- Illustrations (line drawings from the design mock's SVGs) ----
 
-/** An envelope with a small status badge — the arriving-SMS motif. */
+/** An envelope with a small status badge, for arriving messages. */
 @Composable
 fun EnvelopeIllustration(badge: EmptyBadge, modifier: Modifier = Modifier) {
     Canvas(modifier.size(112.dp)) {
@@ -196,7 +196,7 @@ fun EnvelopeIllustration(badge: EmptyBadge, modifier: Modifier = Modifier) {
     }
 }
 
-/** A document behind a magnifier — the "searched but found nothing" motif. */
+/** A document behind a magnifying glass, for "searched but found nothing". */
 @Composable
 fun SearchIllustration(modifier: Modifier = Modifier) {
     Canvas(modifier.size(104.dp)) {
@@ -220,7 +220,7 @@ fun SearchIllustration(modifier: Modifier = Modifier) {
     }
 }
 
-/** A soft green disc with a check — the "all caught up" motif. */
+/** A soft green circle with a tick, for "all caught up". */
 @Composable
 fun CheckCircleIllustration(modifier: Modifier = Modifier) {
     Canvas(modifier.size(64.dp)) {

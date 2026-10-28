@@ -1,19 +1,20 @@
 package com.ledger.domain.parser
 
 import com.ledger.domain.model.Money
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Shared, keyword-anchored field extractors.
+ * Field extractors shared by every provider.
  *
- * Deliberately built from small labelled regexes rather than one giant
- * positional pattern per sender, because Ghanaian telco/bank SMS wording drifts
- * frequently (field order, punctuation, "Current Balance" vs "Avail Bal").
- * Anchoring each field to its own label keeps the parser robust to reordering
- * while still demanding that every required label is present for a strict match.
+ * Each field is found by its own label ("Balance:", "Fee:") with a small
+ * regex, instead of one large pattern per provider. Provider wording changes
+ * often (field order, punctuation, "Current Balance" or "Avail Bal"), and
+ * matching each label separately copes with that. A strict match still needs
+ * every required label to be present.
  */
 internal object FieldExtractors {
 
-    /** GHS 1,250.00 / GH¢1250 / ₵12.50 / GHc 12.5 — currency token is required. */
+    /** GHS 1,250.00, GH¢1250, ₵12.50, GHc 12.5. The currency token is required. */
     private const val CURRENCY = "(?:GHS|GH¢|GHc|GH\\?|₵|GH\\s?cedis?)"
     private const val NUMBER = "([0-9][0-9,]*(?:\\.[0-9]{1,2})?)"
 
@@ -31,38 +32,34 @@ internal object FieldExtractors {
         RegexOption.IGNORE_CASE,
     )
 
-    // The provider TRANSACTION ID — the reliable, unique idempotency key.
-    // Deliberately NOT the "Ref:"/"Reference:" narration, which is unreliable,
-    // user/terminal-authored, and per the design must never be persisted.
+    // The provider's transaction id: the reliable, unique key for a message.
+    // Not the "Ref:" narration, which is free text written by the sender and
+    // is never used as a key.
     private val TXN_ID_LABELED = Regex(
         "(?:financial\\s+transaction\\s+id|transaction\\s+id|txn\\s*id|trans\\.?\\s*id)[:.\\s#]*([A-Za-z0-9\\-]{4,})",
         RegexOption.IGNORE_CASE,
     )
 
-    // Telecel Cash carries no labelled id; its unique key is the 16-digit
-    // confirmation code that opens the message: "0000013581370834 Confirmed."
+    // Telecel Cash has no labelled id. Its unique key is the confirmation code
+    // at the start of the message: "0000013581370834 Confirmed."
     private val TXN_ID_LEADING = Regex("^\\s*(\\d{10,})\\s+confirmed", RegexOption.IGNORE_CASE)
 
     // The free-text narration ("Ref: uber", "Message:Interest for July...").
-    // Captured as a REVIEW HINT only — never a matching/dedup key. Stops at the
-    // next sentence or a structural label so it never swallows the balance/id.
+    // Kept only as a hint for review, never as a key. It stops at the next
+    // sentence or label, so it never takes in the balance or the id.
     //
-    // The `:`/`-` separator is REQUIRED. Without it the label could sit anywhere
-    // in a sentence and drag prose in behind it — MTN's refund alert says
-    // "Message from refunder: ." and the optional form captured the words
-    // "from refunder" as though they were the note.
+    // The ":" or "-" after the label is required. Without it, the label could
+    // match in the middle of a sentence ("Message from refunder: .") and pick
+    // up ordinary words as the note.
     private val NARRATION = Regex(
         "\\b(?:reference|ref|message|narration|reason)\\b\\s*[:\\-]\\s*([^.\\n]{2,80}?)\\s*(?=\\.|\\n|$|(?:financial\\s+)?transaction\\s+id\\b|available\\s+bal|current\\s+bal|your\\s+new\\s+bal)",
         RegexOption.IGNORE_CASE,
     )
 
     /**
-     * A bank crediting a wallet names the *account* first and itself second:
-     * "from: 1441****123 , Ecobank." The masked digits defeat the ordinary
-     * counterparty capture (`*` is not a name character, so it matches nothing
-     * and the message lands as "Unknown sender"), and they are useless as a label
-     * anyway — the bank's name is the part that identifies where the money came
-     * from.
+     * A bank paying into a wallet gives the masked account first and the bank's
+     * name second: "from: 1441****123 , Ecobank." The masked number isn't a usable
+     * name, so the bank's name is taken instead.
      */
     private val MASKED_SOURCE = Regex(
         "\\bfrom:?\\s*(?:[0-9A-Za-z]*\\*{2,}[0-9A-Za-z]*|\\d{6,})\\s*,\\s*" +
@@ -71,10 +68,10 @@ internal object FieldExtractors {
     )
 
     /**
-     * A refund names its source before the verb rather than after a preposition:
+     * A refund names who issued it before the verb, not after a preposition:
      * "MTN BUNDLE (CISNG.sp) has successfully refunded GHS 3.00 to your ...".
-     * The trailing service code in brackets is dropped — it varies per campaign
-     * and would split one merchant into many counterparties.
+     * The bracketed service code is dropped, because it changes per campaign and
+     * would split one merchant into many.
      */
     private val REFUND_SOURCE = Regex(
         "^(?:hello|hi|dear\\s+customer)?[,\\s]*(.{2,60}?)\\s+has\\s+(?:successfully\\s+)?refunded\\b",
@@ -84,22 +81,21 @@ internal object FieldExtractors {
     private val TRAILING_BRACKET = Regex("\\s*\\([^)]*\\)\\s*$")
 
     /**
-     * Cross-network transfers are addressed to a gateway, never to a person: MTN
-     * bills a send to Telecel as "to TELECEL PUSH" and one to AirtelTigo as "to
-     * TIGO PUSH". Taken at face value every such payment collapses onto one of
-     * two counterparties, which is worse than useless for rules and reporting.
+     * Cross-network transfers are addressed to a gateway, not a person. MTN shows
+     * a send to Telecel as "to TELECEL PUSH" and one to AirtelTigo as "to TIGO
+     * PUSH". Taken as written, every such payment would share one of two names.
      */
     private val GATEWAY_LABEL = Regex(
         "^(?:telecel|tigo|airteltigo|at|mtn|vodafone|ghanapay)\\s+push$",
         RegexOption.IGNORE_CASE,
     )
 
-    /** What the gateway hides, spelled out in the narration: "NAME,MSISDN,note". */
+    /** The real recipient behind a gateway, given in the narration as "NAME,MSISDN,note". */
     private val NARRATED_TRIPLE = Regex(
         "^([A-Za-z][A-Za-z .'\\-]{1,40}?)\\s*,\\s*((?:\\+?233|0)\\d{9})\\s*(?:,\\s*(.{1,60}))?$",
     )
 
-    /** Ghana MSISDN in local (0XXXXXXXXX) or international (233XXXXXXXXX) form. */
+    /** A Ghana phone number in local (0XXXXXXXXX) or international (233XXXXXXXXX) form. */
     private val PHONE = Regex("\\b(?:233|\\+233|0)\\d{9}\\b")
 
     data class Anchored(val value: Money, val range: IntRange)
@@ -112,23 +108,27 @@ internal object FieldExtractors {
         Money.parse(m.groupValues[1])?.let { Anchored(it, m.range) }
     }
 
-    /** Labelled transaction id, else Telecel's leading confirmation code, else null
-     *  (ref-less types such as interest credits — dedup falls back to a composite key). */
+    /**
+     * The labelled transaction id, or Telecel's leading confirmation code, or null.
+     * Some messages have no id (interest credits, for example); dedup then uses a
+     * key built from the other fields.
+     */
     fun transactionId(body: String): String? =
         (TXN_ID_LABELED.find(body)?.groupValues?.get(1)
             ?: TXN_ID_LEADING.find(body.trim())?.groupValues?.get(1))
             ?.takeIf { it.isNotBlank() }
 
-    /** Free-text narration to show at review time. Null when absent/empty. A
-     *  value that is only the reference label with no content is dropped. */
+    /**
+     * The free-text narration, shown during review. Null when missing, or when
+     * the label is there with nothing after it.
+     */
     fun referenceHint(body: String): String? =
         NARRATION.find(body)?.groupValues?.get(1)?.trim()?.trimEnd('.', ',', ' ')
             ?.takeIf { it.isNotBlank() && it.length >= 2 }
 
     /**
-     * The transaction amount is the first currency amount in the body whose
-     * span does not overlap the balance or fee matches. This avoids the classic
-     * bug of reading the balance as the amount.
+     * The transaction amount: the first currency amount that isn't part of the
+     * balance or fee matches. This stops the balance being read as the amount.
      */
     fun transactionAmount(body: String, balance: Anchored?, fee: Anchored?): Money? {
         val excluded = listOfNotNull(balance?.range, fee?.range)
@@ -165,22 +165,66 @@ internal object FieldExtractors {
         trim().trimEnd('.', ',', ' ').trim().takeIf { it.isNotBlank() }
 
     /**
-     * Extracts a counterparty name/number following a preposition such as
-     * "to" (debit) or "from" (credit). Falls back to a phone number anywhere in
-     * the body. Names are captured up to the next sentence/clause boundary and
-     * trimmed of trailing punctuation.
+     * Words that can follow a preposition but are never a party. Without this,
+     * "received at 14:32:19" would give "14", and "wait for confirmation" would
+     * give "confirmation".
      */
-    fun counterparty(body: String, prepositions: List<String>): String? {
-        for (prep in prepositions) {
-            val r = Regex(
+    private val NON_PARTY_WORDS = setOf(
+        "confirmation", "confirmations", "details", "processing", "approval",
+        "verification", "further", "more", "you", "your", "it", "us", "me", "this",
+    )
+
+    /**
+     * A match only counts as a party if it has a letter, or looks like a phone
+     * number ("bought airtime for 0244000222"). Any other bare number is part of
+     * something else.
+     */
+    private fun isPlausibleParty(value: String): Boolean {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return false
+        if (trimmed.lowercase() in NON_PARTY_WORDS) return false
+        val hasLetter = trimmed.any { it.isLetter() }
+        if (!hasLetter) return trimmed.count { it.isDigit() } >= 9
+        return true
+    }
+
+    /**
+     * Compiled preposition patterns, cached by preposition, so each message
+     * doesn't compile them again.
+     */
+    private val prepositionPatterns = ConcurrentHashMap<String, Regex>()
+
+    private fun prepositionPattern(prep: String): Regex =
+        prepositionPatterns.getOrPut(prep) {
+            Regex(
                 "\\b$prep:?\\s+([A-Za-z0-9][A-Za-z0-9 .&'/\\-]{1,40}?)(?=[.,;:]|\\s+(?:for|on|with|has|current|avail|bal|ref|fee|transaction|txn|new|dated)\\b|\\s*\\(|$)",
                 RegexOption.IGNORE_CASE,
             )
-            r.find(body)?.groupValues?.get(1)?.trim()?.trimEnd('.', ',', ' ')
-                ?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+
+    /**
+     * The name or number after a preposition such as "to" (money out) or "from"
+     * (money in), or failing that a phone number anywhere in the message.
+     */
+    fun counterparty(body: String, prepositions: List<String>): String? {
+        for (prep in prepositions) {
+            prepositionPattern(prep).find(body)?.groupValues?.get(1)?.trim()?.trimEnd('.', ',', ' ')
+                ?.takeIf { isPlausibleParty(it) }?.let { return it }
         }
         return phone(body)
     }
+
+    /**
+     * True when the message is about buying airtime or data from the provider
+     * itself. There is no third party; the provider is the merchant.
+     */
+    fun isSelfServicePurchase(body: String): Boolean {
+        val lower = body.lowercase()
+        return SELF_SERVICE_MARKERS.any { it in lower }
+    }
+
+    private val SELF_SERVICE_MARKERS =
+        listOf("bundle purchase", "purchase of bundle", "data bundle", "of airtime", "airtime purchase")
 
     private fun IntRange.overlaps(other: IntRange): Boolean =
         first <= other.last && other.first <= last
